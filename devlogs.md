@@ -144,5 +144,4 @@ Remaining: final full-run verdict + devlog citation; cache refresh post-push
 - **client.log observability verified live**: every `[bg-bash]` line in `S<N>.plugin.log` came from the isolated server's `opencode.log` (grep-filtered at snapshot time, `validate.ts:597`); `--log-level DEBUG` on the serve side is required (proven: run 1 with ERROR-level filter would have dropped everything). Greppable single-line format preserved through the server's own formatter.
 - Unit tests: 40/40 green; `tsc --noEmit` clean.
 - Teardown per §18.6: no VALTAG stragglers; scratch dirs removed.
-
-Remaining: cache refresh post-push (`rm -rf ~/.cache/opencode/packages/github:RohanAwhad`); tag 0.1.5
+- Deployed: 0e83e63 pushed to main (0.1.5), global cache refreshed (`rm -rf ~/.cache/opencode/packages/github:RohanAwhad`). Repo uses package.json version for installs — no git tags in this flow.
