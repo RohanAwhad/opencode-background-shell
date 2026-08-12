@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import os from "node:os"
 import path from "node:path"
 import fs from "node:fs"
-import {
+import plugin, { type TestInternals, type Job } from "../.opencode/plugins/background-bash"
+
+const {
   JobManager,
   buildTerminalNotification,
   buildStallNotification,
@@ -19,7 +21,7 @@ import {
   askExternalDirectoryPermission,
   waitSyncOrPromote,
   setLogFilePath,
-} from "../.opencode/plugins/background-bash"
+} = (plugin as unknown as { testInternals: TestInternals }).testInternals
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "bg-bash-test-"))
@@ -174,7 +176,7 @@ describe("readJobLog", () => {
   })
 })
 
-function makeJob(overrides: Partial<import("../.opencode/plugins/background-bash").Job> = {}): import("../.opencode/plugins/background-bash").Job {
+function makeJob(overrides: Partial<Job> = {}): Job {
   return {
     id: "bg_x",
     owner: "s1",

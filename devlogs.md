@@ -41,4 +41,18 @@ Remaining: implement plugin skeleton (registry + spawn + hooks); permission heur
 - 31 unit tests green: state machine, spawn/exit/127, kill+cancelled, eviction, killOwner scoping, watchdog stall once+dedupe+survives, no-stall active output, permission payloads+deny, external-dir globs, envelopes, compaction context, read offset/tail, config, log-marker contract
 - `bun x tsc --noEmit` clean
 
-Remaining: live smoke (S1 routing, S2 happy path notify); agentic validation harness scripts/validate.ts (spec §18); README
+Remaining: agentic validation harness scripts/validate.ts (spec §18, S3-S10); README
+
+## 2026-08-12 — Live smoke S1+S2 PASS; key harness learnings
+
+- S1 PASS: forced builtin-bash attempt → `event=block tool=bash blocked=true` in plugin log + full guidance error in session output; model rerouted to background_bash automatically
+- S2 PASS (with serve): background job `sleep 3 && echo VALTAG_1 done` survived model-turn end, exit 0, `event=notify ... sent=true` woke the session, model read log and reported "VALTAG_1 done"
+- **Harness-critical learnings**:
+  - Plugin file must have ONLY a default export — legacy loader's `getLegacyPlugins` iterates ALL module exports and throws "Plugin export is not a function" on any named export (fixed: internals via `testInternals` on default)
+  - `opencode run` headless exits when the model's turn ends → server shuts down → `dispose` fires → running jobs get killed. Long-running scenarios (S2/S3/S6) must use `opencode serve` + `opencode run --attach http://127.0.0.1:PORT` so the server (and jobs) persist
+  - Sandbox CLI attaches to an existing server via the data-dir socket unless XDG_DATA_HOME is isolated — MUST isolate XDG_CONFIG_HOME + XDG_CACHE_HOME + XDG_DATA_HOME (was posting into the user's live server!)
+  - `auth.json` lives at ~/.local/share/opencode/auth.json on this machine (no deepseek cred — model must be pinned to an env-key provider, e.g. openai/gpt-4o-mini with OPENAI_API_KEY)
+  - macOS has no `timeout` command — harness must poll instead
+  - S1's block proof needs an adversarial prompt ("Do NOT use background_bash, use ONLY the builtin bash tool") — guidance alone makes the model use background_bash willingly
+
+Remaining: agentic validation harness scripts/validate.ts (spec §18, S3-S10); README

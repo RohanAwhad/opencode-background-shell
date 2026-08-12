@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs"
 
-export const PLUGIN_ID = "opencode-background-shell"
+const PLUGIN_ID = "opencode-background-shell"
 const LOG_PREFIX = "[bg-bash]"
 const STALL_TAIL_BYTES = 1024
 const KILL_GRACE_MS = 5000
@@ -21,7 +21,7 @@ export type PluginConfig = {
   output_dir: string
 }
 
-export const defaultConfig: PluginConfig = {
+const defaultConfig: PluginConfig = {
   enabled: true,
   route_bash: true,
   sync_wait_ms: 60_000,
@@ -41,7 +41,7 @@ const CONFIG_KEYS: (keyof PluginConfig)[] = [
   "output_dir",
 ]
 
-export const PROMPT_PATTERNS: RegExp[] = [
+const PROMPT_PATTERNS: RegExp[] = [
   /\(y\/n\)/i,
   /Press any key/i,
   /Press Enter/i,
@@ -53,7 +53,7 @@ export const PROMPT_PATTERNS: RegExp[] = [
   /^>\s/m,
 ]
 
-export const FILE_OPS = new Set([
+const FILE_OPS = new Set([
   "cat", "rm", "touch", "mkdir", "cp", "mv", "chmod", "chown", "ln", "grep", "sed", "awk",
   "tail", "head", "less", "more", "sort", "wc", "diff", "patch", "curl", "wget", "tar",
   "unzip", "zip", "rsync", "scp", "ls", "find", "xargs", "tee", "tr", "cut", "uniq", "od",
@@ -85,12 +85,12 @@ export type Job = {
 
 let logFilePath = ""
 
-export function setLogFilePath(p: string) {
+function setLogFilePath(p: string) {
   logFilePath = p
   mkdirSync(path.dirname(p), { recursive: true })
 }
 
-export function log(
+function log(
   level: "debug" | "info" | "error",
   fields: Record<string, string | number | boolean | null | undefined>,
 ) {
@@ -108,7 +108,7 @@ export function log(
   }
 }
 
-export function generateJobId(): string {
+function generateJobId(): string {
   const bytes = new Uint8Array(JOB_ID_BYTES)
   crypto.getRandomValues(bytes)
   return "bg_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
@@ -118,7 +118,7 @@ function expandHome(p: string): string {
   return p.startsWith("~") ? p.replace(/^~/, os.homedir()) : p
 }
 
-export function resolveConfig(raw: unknown, base: PluginConfig = defaultConfig): PluginConfig {
+function resolveConfig(raw: unknown, base: PluginConfig = defaultConfig): PluginConfig {
   const merged: PluginConfig = { ...base }
   if (raw && typeof raw === "object") {
     for (const key of CONFIG_KEYS) {
@@ -130,15 +130,15 @@ export function resolveConfig(raw: unknown, base: PluginConfig = defaultConfig):
   return merged
 }
 
-export function sleep(ms: number): Promise<void> {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export function promptTailMatches(tail: string): boolean {
+function promptTailMatches(tail: string): boolean {
   return PROMPT_PATTERNS.some((re) => re.test(tail))
 }
 
-export function tokenizeShellCommand(command: string): string[] {
+function tokenizeShellCommand(command: string): string[] {
   const tokens: string[] = []
   let cur = ""
   let quote: "'" | '"' | null = null
@@ -162,7 +162,7 @@ export function tokenizeShellCommand(command: string): string[] {
   return tokens
 }
 
-export function resolveExternalDirectories(
+function resolveExternalDirectories(
   command: string,
   cwd: string,
   worktree: string,
@@ -195,7 +195,7 @@ export function resolveExternalDirectories(
   return Array.from(dirs)
 }
 
-export function buildTerminalNotification(job: Job): string {
+function buildTerminalNotification(job: Job): string {
   return [
     "<task-notification>",
     `<task-id>${job.id}</task-id>`,
@@ -211,7 +211,7 @@ export function buildTerminalNotification(job: Job): string {
     .join("\n")
 }
 
-export function buildStallNotification(job: Job): string {
+function buildStallNotification(job: Job): string {
   return [
     "<task-notification>",
     `<task-id>${job.id}</task-id>`,
@@ -222,7 +222,7 @@ export function buildStallNotification(job: Job): string {
   ].join("\n")
 }
 
-export const GUIDANCE_LINES = [
+const GUIDANCE_LINES = [
   "## Background shell execution",
   "- The builtin `bash` tool is intercepted by the opencode-background-shell plugin. Use `background_bash` for all shell work.",
   "- Quick commands: background_bash(command, run_in_background=false) — output is returned inline.",
@@ -233,7 +233,7 @@ export const GUIDANCE_LINES = [
   "- If you receive a stalled notification: kill the job and re-run it non-interactively (e.g. echo y | <command>).",
 ]
 
-export function buildCompactionContext(jobs: Job[]): string {
+function buildCompactionContext(jobs: Job[]): string {
   if (jobs.length === 0) return ""
   const sections: string[] = ["<background-jobs>"]
   for (const job of jobs) {
@@ -247,7 +247,7 @@ export function buildCompactionContext(jobs: Job[]): string {
   return sections.join("\n")
 }
 
-export function buildRunningResult(job: Job, note?: string): string {
+function buildRunningResult(job: Job, note?: string): string {
   return [
     `<task state="running" task-id="${job.id}" label="${job.label}">`,
     "Command is running in the background.",
@@ -260,7 +260,7 @@ export function buildRunningResult(job: Job, note?: string): string {
     .join("\n")
 }
 
-export class JobManager {
+class JobManager {
   readonly registry = new Map<string, Job>()
   readonly completedOrder: string[] = []
   private config: PluginConfig
@@ -502,7 +502,7 @@ function signalKillGroup(job: Job, signal: NodeJS.Signals) {
   }
 }
 
-export function formatStatus(job: Job): { output: string; metadata: Record<string, unknown> } {
+function formatStatus(job: Job): { output: string; metadata: Record<string, unknown> } {
   const elapsed = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 1000)
   return {
     output: [
@@ -522,7 +522,7 @@ export function formatStatus(job: Job): { output: string; metadata: Record<strin
   }
 }
 
-export function formatList(jobs: Job[]): string {
+function formatList(jobs: Job[]): string {
   if (jobs.length === 0) return "No jobs."
   const header = "id\tstate\texit\tstarted\telapsed\tbytes\tlabel"
   const rows = jobs.map((j) => {
@@ -532,7 +532,7 @@ export function formatList(jobs: Job[]): string {
   return [header, ...rows].join("\n")
 }
 
-export function readJobLog(job: Job, input: { offset?: number; limit?: number; tail?: boolean }): {
+function readJobLog(job: Job, input: { offset?: number; limit?: number; tail?: boolean }): {
   output: string
   metadata: { found: boolean; state: JobState; nextOffset: number; totalBytes: number }
 } {
@@ -554,7 +554,7 @@ export function readJobLog(job: Job, input: { offset?: number; limit?: number; t
   return { output: content, metadata: { found: true, state: job.state, nextOffset, totalBytes: total } }
 }
 
-export async function askBashPermission(
+async function askBashPermission(
   ctx: Pick<ToolContext, "ask">,
   command: string,
 ): Promise<{ allowed: boolean; reason: string }> {
@@ -574,7 +574,7 @@ export async function askBashPermission(
   }
 }
 
-export async function askExternalDirectoryPermission(
+async function askExternalDirectoryPermission(
   ctx: Pick<ToolContext, "ask">,
   command: string,
   worktree: string,
@@ -597,7 +597,7 @@ export async function askExternalDirectoryPermission(
   }
 }
 
-export async function waitSyncOrPromote(
+async function waitSyncOrPromote(
   job: Job,
   syncWaitMs: number,
   abort: AbortSignal,
@@ -615,9 +615,9 @@ export async function waitSyncOrPromote(
   return outcome
 }
 
-export type PluginHooks = Hooks
 
-export const BackgroundShellPlugin: Plugin = async (input, options) => {
+
+const BackgroundShellPlugin: Plugin = async (input, options) => {
   if (!logFilePath) {
     setLogFilePath(path.join(process.cwd(), "logs", "background-bash.log"))
   }
@@ -861,6 +861,29 @@ export const BackgroundShellPlugin: Plugin = async (input, options) => {
   return { tool: tools, ...hooks }
 }
 
+export type TestInternals = {
+  JobManager: typeof JobManager
+  buildTerminalNotification: typeof buildTerminalNotification
+  buildStallNotification: typeof buildStallNotification
+  buildCompactionContext: typeof buildCompactionContext
+  buildRunningResult: typeof buildRunningResult
+  resolveExternalDirectories: typeof resolveExternalDirectories
+  tokenizeShellCommand: typeof tokenizeShellCommand
+  promptTailMatches: typeof promptTailMatches
+  readJobLog: typeof readJobLog
+  formatStatus: typeof formatStatus
+  formatList: typeof formatList
+  generateJobId: typeof generateJobId
+  resolveConfig: typeof resolveConfig
+  askBashPermission: typeof askBashPermission
+  askExternalDirectoryPermission: typeof askExternalDirectoryPermission
+  waitSyncOrPromote: typeof waitSyncOrPromote
+  setLogFilePath: typeof setLogFilePath
+  log: typeof log
+  PROMPT_PATTERNS: typeof PROMPT_PATTERNS
+  FILE_OPS: typeof FILE_OPS
+}
+
 export default Object.assign(BackgroundShellPlugin, {
   testInternals: {
     JobManager,
@@ -883,5 +906,5 @@ export default Object.assign(BackgroundShellPlugin, {
     log,
     PROMPT_PATTERNS,
     FILE_OPS,
-  },
+  } satisfies TestInternals,
 })
