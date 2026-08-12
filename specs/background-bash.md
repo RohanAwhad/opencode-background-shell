@@ -241,8 +241,8 @@ bytes       bytes written to log
 
 ### 9.3 Spawn
 
-- `Bun.spawn(command, { cwd, env: process.env, detached: true, setsid: true, stdin: "pipe", stdout: "pipe", stderr: "pipe" })` — actually spawned as `sh -c "<command>"` via `Bun.spawn(["sh", "-c", command])`.
-- **stdin is an open-but-silent pipe, never written to** (Claude Code parity, `RESEARCH.md` §5): commands that block on stdin hang rather than getting EOF-exit — that hang is what the stall watchdog detects (§11). `stdin: "ignore"` would make `read`-style commands exit instantly and defeat the watchdog.
+- `Bun.spawn(command, { cwd, env: process.env, detached: true, setsid: true, stdin: <mode>, stdout: "pipe", stderr: "pipe" })` — actually spawned as `sh -c "<command>"` via `Bun.spawn(["sh", "-c", command])`.
+- **stdin is `/dev/null` by default** (`job_stdin: "devnull"`, configurable): never written to, and child processes get a sane EOF stdin. Socket-stdin hazard (discovered 2026-08-12): Bun implements `stdin: "pipe"` as a socketpair, and children that inherit it can hang waiting for input — observed with `opencode run` inside a job hanging at init until `</dev/null` was added. `job_stdin: "pipe"` restores the legacy open-but-silent socket mode, where commands that block on stdin hang and the stall watchdog (§11) detects them.
 - stdout and stderr → **same log file** (both fds appended to one file, Claude Code style).
 - Detached from the start ⇒ survives the foreground wait, survives abort, survives opencode's own process lifetime (see §15 assumptions for orphaning).
 
@@ -311,7 +311,9 @@ With the pass-through, `createUserMessage` stamps the injected message identical
 
 ## 11. Stall watchdog
 
-Purpose (per `docs/claude-code/RESEARCH.md` §8): a background process blocked on stdin (e.g. `Press any key`, `Continue?`, password prompt) would sit silently forever — the model cannot type into it. The watchdog detects the stall and tells the model to re-run non-interactively.
+Purpose (per `docs/claude-code/RESEARCH.md` §8): a background process blocked on input (e.g. `Press any key`, `Continue?`, password prompt) would sit silently forever — the model cannot type into it. The watchdog detects the stall and tells the model to re-run non-interactively.
+
+> stdin note: in the default `job_stdin: "devnull"` mode, stdin reads get EOF instantly (fail-fast — no stdin-blocking stalls occur); the watchdog catches **output-driven** prompts only. `job_stdin: "pipe"` restores the legacy open-but-silent socket so stdin-blocking commands (`read line`) stall and are caught too (§9.3).
 
 **Mechanics** (per job, running state only):
 
@@ -372,7 +374,8 @@ Read from plugin config under the `"background_bash"` key. All fields optional.
     "watchdog_interval_ms": 5000,  // default 5000
     "stall_threshold_ms": 45000,   // default 45000
     "max_completed_jobs": 20,      // list-retention cap; default 20
-    "output_dir": "~/.local/share/opencode/background-bash" // default
+    "output_dir": "~/.local/share/opencode/background-bash", // default
+    "job_stdin": "devnull"         // devnull = /dev/null stdin (default); pipe = legacy open-but-silent socket
   }
 }
 ```
@@ -453,13 +456,14 @@ cd <repo> && bun run scripts/validate.ts --scratch "$SCRATCH"
 | S3 | Sync mode + auto-promotion | Test config `sync_wait_ms: 5000`; prompt: `background_bash(command="sleep 30 && echo VALTAG_2", run_in_background=false)` | Result is running-state with `auto-promoted` note; plugin log `event=promote`; at t+35s `pgrep -f VALTAG_2` alive; later `event=exit` + `event=notify` | Promote logged, process alive mid-job, exit+notify after |
 | S4 | Permission reuse (allow) | Fixture: `permission: {"bash": {"echo VALTAG_3 *": "allow"}}`; prompt runs `background_bash(command="echo VALTAG_3 ok")` | No prompt (headless would fail otherwise); plugin log `event=permit via=bash` (grant source is not distinguishable from the ask outcome); job runs and exits | Permit logged, job completes |
 | S5 | Permission deny | Fixture: `permission: {"bash": {"*rm*": "deny"}}`; prompt runs `background_bash(command="rm -rf /tmp/VALTAG_4")` | Tool result contains `[PERMISSION_DENIED]`; plugin log `event=deny via=bash`; **no** `event=spawn` for that command (model may paraphrase the result text in session output — plugin log is authoritative) | Deny logged, no spawn |
-| S6 | Stall watchdog | Prompt runs `background_bash(command="read line && echo got \$line")` (stdin open-but-silent ⇒ blocks) | Within ~stall_threshold+watchdog interval: plugin log `event=stall` once; session stdout contains `<status>stalled</status>` with re-run advice; `pgrep` shows process **still alive** (watchdog never kills) | Stall fires once, process survives |
+| S6 | Stall watchdog | Fixture `job_stdin: "pipe"` (legacy open-but-silent socket); prompt runs `background_bash(command="read line && echo got \$line")` (stdin open-but-silent ⇒ blocks) | Within ~stall_threshold+watchdog interval: plugin log `event=stall` once; session stdout contains `<status>stalled</status>` with re-run advice; `pgrep` shows process **still alive** (watchdog never kills) | Stall fires once, process survives |
 | S7 | Cancel | Prompt runs `background_bash(command="sleep 60")` then `background_kill(job_id=...)` | `event=kill` logged; job state `cancelled` via `background_status`; **no** completion notification (`event=notify status=cancelled` absent); `pgrep` dead within kill grace (5 s) | Killed group, no terminal notify |
 | S8 | Session cleanup | Prompt starts a long job, then agent deletes the session (`client.session.delete` via SDK from the harness); or start job in a session and `session.delete` it | Plugin log `event=cleanup session=<id>`, then `event=kill` per job; `pgrep` dead within grace | All jobs dead after session deletion |
 | S9 | Compaction carry | Fixture `compaction: {auto: true, reserved: <model context − 1000>}` so auto-compaction fires within a few turns (v1 `reserved` migrates to v2 `buffer`); start job, then continue chatting until compact; read compacted summary | Compacted summary contains the running job's id/label (from §13 injection); `event=notify` for the job still delivered after compaction (buffered if needed) | Job context in summary; post-compaction notify works. **Headless SKIP-with-reason on this machine**: no model in the local models.dev catalog carries `limits.context` (e.g. openai/gpt-4o-mini `limits: {}` in ~/.cache/opencode/models.json), and core's `compactIfNeeded` returns false when `context === undefined` (`packages/core/src/session/compaction.ts`) — auto-compaction cannot trigger. Unit tests cover `buildCompactionContext`; manual TUI verification documented |
 | S10 | Kill-switch | Fixture `route_bash: false`; prompt: `list the files using the bash tool` | No guidance error; command output present; plugin log **no** `event=block` | Bash executes normally |
+| S11 | Devnull stdin (nested opencode run) | Default fixture (`job_stdin` unset); prompt runs `background_bash(command="echo S11_JOB_STARTED && ([ -S /dev/fd/0 ] && echo S11_STDIN_SOCKET || echo S11_STDIN_DEVNULL) && opencode run 'echo nested-opencode-ok'; echo S11_JOB_EXIT:\$?")` | Spawn line logs `stdin=devnull`; job log contains `S11_STDIN_DEVNULL` (POSIX `-S` socket test on `/dev/fd/0` — portable, macOS `readlink` is unreliable); nested `opencode run` output in job log (completes — no socket-stdin hang); job exits `S11_JOB_EXIT:0` | stdin=devnull logged; no socket stdin; nested run completes; exit 0 |
 
-Sequencing note: S1 must run first (proves routing), S10 last (proves escape hatch). Each scenario is a fresh `opencode run` invocation in the scratch project so state does not leak; S6 runs last in the timed block because it intentionally takes ~10 s.
+Sequencing note: S1 must run first (proves routing), S10 near the end (proves escape hatch), S11 last (slow — nested `opencode run` makes a second model call). Each scenario is a fresh `opencode run` invocation in the scratch project so state does not leak; S6 runs last in the timed block because it intentionally takes ~10 s.
 
 ### 18.5 Evidence artifacts
 
@@ -498,7 +502,7 @@ Assumptions not specified in this session or the research docs. Read these befor
 1. **Plugin host**: the plugin runs in OpenCode's plugin runtime (Bun) and is loaded as a **local plugin from this repo** (`.opencode/plugins/`), TypeScript, using `@opencode-ai/plugin` types vendored from `external_libs/opencode` (dev branch). No npm publication planned for v1.
 2. **Process lifetime / orphaning**: `detached: true` means jobs outlive the OpenCode process. If opencode exits without `dispose` (crash, kill -9), jobs keep running with no registry to notify them. **Accepted for v1**; no reaping on next start (no persistence). A future mitigation (pid file + re-claim on boot) is out of scope.
 3. **POSIX-only**: macOS/Linux. `setsid`, `kill(-pgid)`, `/bin/sh` semantics assumed. No Windows handling anywhere.
-4. **No stdin**: jobs never receive stdin; interactivity is explicitly not supported (watchdog is the substitute). If a job needs a PTY, this plugin is the wrong tool — that is opencode-pty's territory, and combining them is not planned.
+4. **No stdin**: jobs get `/dev/null` stdin by default (`job_stdin: "devnull"`) — the no-interactivity guarantee; `job_stdin: "pipe"` restores the legacy open-but-silent socket mode for block-on-stdin detection (§9.3). Interactivity is explicitly not supported (watchdog is the substitute). If a job needs a PTY, this plugin is the wrong tool — that is opencode-pty's territory, and combining them is not planned.
 5. **Shell semantics**: commands are executed via `sh -c "<command>"` in the session's working directory with `process.env` inherited. Env is a superset of the builtin bash's (which applies `shell.env` plugin hook output — we do not). If shell.env parity is needed, that's an unplanned change.
 6. **Model behavior assumptions**: (a) with guidance text, the model will stop calling `bash` after ~1-2 guidance errors; (b) the model will not poll and will instead continue working (per guidance); (c) the model can be trusted to pass `run_in_background=false` for genuinely quick commands — otherwise sync-mode promotion covers it. These are unverified; routing + promotion make violations low-cost.
 7. **Permission-grant matching**: a grant stored under action `"bash"` matches our `ctx.ask` when the glob matches the command string — including always-grants with prefix globs (`bun test *`). Verified by reading `permission/evaluate.ts` and OMO's Monitor usage; assumed stable across opencode versions.

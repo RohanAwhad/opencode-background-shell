@@ -10,7 +10,7 @@ const DEFAULT_MODEL = process.env.VALIDATE_MODEL ?? "openai/gpt-4o-mini"
 const RUN_TIMEOUT_MS = 90_000
 const SCENARIO_TIMEOUT_MS = 120_000
 
-type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10"
+type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10" | "S11"
 
 type Scenario = {
   id: ScenarioId
@@ -328,7 +328,19 @@ const scenarios: Scenario[] = [
   {
     id: "S6",
     name: "Stall watchdog",
-    config: {},
+    config: {
+      plugin: [
+        [
+          `file://${PLUGIN_PATH}`,
+          {
+            background_bash: {
+              ...extractPluginConfig({} as Scenario),
+              job_stdin: "pipe",
+            },
+          },
+        ],
+      ],
+    },
     prompt: "Run 'printf \"Continue? \" && read line && echo got $line' with background_bash. Do not kill it. Just report the tool result.",
     expect: (e) => {
       const claims: string[] = []
@@ -448,6 +460,39 @@ const scenarios: Scenario[] = [
       return claims
     },
   },
+  {
+    id: "S11",
+    name: "Devnull stdin (nested opencode run)",
+    config: {},
+    prompt:
+      "Run exactly this command with background_bash: echo S11_JOB_STARTED && ([ -S /dev/fd/0 ] && echo S11_STDIN_SOCKET || echo S11_STDIN_DEVNULL) && opencode run 'echo nested-opencode-ok'; echo S11_JOB_EXIT:$?. Do not kill it. Just report the tool result.",
+    expect: (e) => {
+      const claims: string[] = []
+      const spawn = grepLines(e.pluginLog, /event=spawn .* command=echo S11_JOB_STARTED/)
+      const jobId = spawn[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+      if (!jobId) {
+        claims.push("FAIL: no spawn line for S11 job")
+        return claims
+      }
+      let jobLog = ""
+      try {
+        jobLog = e.readFile(`${jobId}.log`)
+      } catch {
+        claims.push("FAIL: job log not collected")
+        return claims
+      }
+      if (jobLog.includes("S11_STDIN_DEVNULL")) claims.push(`PASS: job stdin is not a socket (${jobId}.log)`)
+      else claims.push("FAIL: job stdin is a socket")
+      if (jobLog.includes("nested-opencode-ok")) claims.push("PASS: nested opencode run completed (no socket-stdin hang)")
+      else claims.push("FAIL: nested opencode run did not complete")
+      if (jobLog.includes("S11_JOB_EXIT:0")) claims.push("PASS: job exited 0")
+      else claims.push("FAIL: job exit code not 0")
+      const stdinMode = grepLines(e.pluginLog, /event=spawn .* stdin=devnull/)
+      if (stdinMode.length > 0) claims.push(`PASS: spawn logged stdin=devnull (${e.pluginLog}:${stdinMode[0].line})`)
+      else claims.push("FAIL: spawn log missing stdin=devnull")
+      return claims
+    },
+  },
 ]
 
 function reportSection(scenario: Scenario, claims: string[], timeoutMs: number, timedOut: boolean): string {
@@ -512,6 +557,19 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
   }
   if (scenario.id === "S6") {
     await Bun.sleep(12_000)
+  }
+  if (scenario.id === "S11") {
+    const spawnLines = grepLines(projectLog, /event=spawn .* command=echo S11_JOB_STARTED/)
+    const jobId = spawnLines[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+    const owner = spawnLines[0]?.text.match(/owner=(\S+)/)?.[1]
+    if (jobId && owner) {
+      const jobLog = path.join(scratch, "out", owner, `${jobId}.log`)
+      await waitFor(
+        () => fs.existsSync(jobLog) && fs.readFileSync(jobLog, "utf8").includes("S11_JOB_EXIT:"),
+        60_000,
+        500,
+      )
+    }
   }
 
   fs.copyFileSync(projectLog, pluginLog)

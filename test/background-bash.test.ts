@@ -56,6 +56,7 @@ describe("resolveConfig", () => {
     expect(cfg.route_bash).toBe(true)
     expect(cfg.sync_wait_ms).toBe(60_000)
     expect(cfg.output_dir).toBe(path.join(os.homedir(), ".local/share/opencode/background-bash"))
+    expect(cfg.job_stdin).toBe("devnull")
   })
 
   test("overrides and ~ expansion", () => {
@@ -63,6 +64,10 @@ describe("resolveConfig", () => {
     expect(cfg.sync_wait_ms).toBe(5000)
     expect(cfg.route_bash).toBe(false)
     expect(cfg.output_dir).toBe(path.join(os.homedir(), "bg-test"))
+  })
+
+  test("job_stdin override", () => {
+    expect(resolveConfig({ job_stdin: "pipe" }).job_stdin).toBe("pipe")
   })
 })
 
@@ -358,6 +363,26 @@ describe("JobManager spawn/lifecycle", () => {
     await waitFor(() => mine.state === "cancelled")
     expect(theirs.state).toBe("running")
     await manager.kill(theirs)
+  })
+})
+
+describe("job_stdin", () => {
+  test("default devnull → child stdin is not a socket", async () => {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
+    const job = await manager.spawn({ command: "[ -S /dev/fd/0 ] && echo IS_SOCKET || echo NOT_SOCKET", workdir: dir, label: "stdin", owner: "s1" }, () => Promise.resolve(), () => {})
+    await waitFor(() => job.state === "exited")
+    expect(job.exitCode).toBe(0)
+    expect(fs.readFileSync(job.logPath, "utf8")).toContain("NOT_SOCKET")
+  })
+
+  test("pipe mode → child stdin is a socket", async () => {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig({ job_stdin: "pipe", output_dir: dir }) })
+    const job = await manager.spawn({ command: "[ -S /dev/fd/0 ] && echo IS_SOCKET || echo NOT_SOCKET", workdir: dir, label: "stdin", owner: "s1" }, () => Promise.resolve(), () => {})
+    await waitFor(() => job.state === "exited")
+    expect(job.exitCode).toBe(0)
+    expect(fs.readFileSync(job.logPath, "utf8")).toContain("IS_SOCKET")
   })
 })
 

@@ -19,6 +19,7 @@ export type PluginConfig = {
   stall_threshold_ms: number
   max_completed_jobs: number
   output_dir: string
+  job_stdin: "devnull" | "pipe"
 }
 
 const defaultConfig: PluginConfig = {
@@ -29,6 +30,7 @@ const defaultConfig: PluginConfig = {
   stall_threshold_ms: 45_000,
   max_completed_jobs: 20,
   output_dir: "~/.local/share/opencode/background-bash",
+  job_stdin: "devnull",
 }
 
 const CONFIG_KEYS: (keyof PluginConfig)[] = [
@@ -39,6 +41,7 @@ const CONFIG_KEYS: (keyof PluginConfig)[] = [
   "stall_threshold_ms",
   "max_completed_jobs",
   "output_dir",
+  "job_stdin",
 ]
 
 const PROMPT_PATTERNS: RegExp[] = [
@@ -78,7 +81,7 @@ export type Job = {
   notificationSentAt: number | null
   bytes: number
   spawnError: string | null
-  proc: import("bun").Subprocess<"pipe", "pipe", "pipe"> | null
+  proc: import("bun").Subprocess<"pipe" | "ignore", "pipe", "pipe"> | null
   _sink: import("bun").FileSink | null
   _watchdog: ReturnType<typeof setInterval> | null
 }
@@ -381,13 +384,13 @@ class JobManager {
     }
     this.registry.set(id, job)
 
-    let proc: import("bun").Subprocess<"pipe", "pipe", "pipe">
+    let proc: import("bun").Subprocess<"pipe" | "ignore", "pipe", "pipe">
     try {
       proc = Bun.spawn(["sh", "-c", input.command], {
         cwd: input.workdir,
         env: process.env,
         detached: true,
-        stdin: "pipe",
+        stdin: this.config.job_stdin === "pipe" ? "pipe" : "ignore",
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -406,7 +409,7 @@ class JobManager {
     job.state = "running"
     const sink = Bun.file(logPath).writer()
     job._sink = sink
-    log("info", { job: id, event: "spawn", pid: proc.pid, owner: input.owner, command: input.command, label: input.label })
+    log("info", { job: id, event: "spawn", pid: proc.pid, owner: input.owner, stdin: this.config.job_stdin, command: input.command, label: input.label })
 
     const pump = async (stream: ReadableStream<Uint8Array>) => {
       const reader = stream.getReader()

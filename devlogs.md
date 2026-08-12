@@ -69,6 +69,14 @@ Remaining: agentic validation harness scripts/validate.ts (spec §18, S3-S10); R
 
 Remaining: none for v1 (spec S9 manual TUI compaction check pending)
 
+## 2026-08-11 — Spec phase: background-agents (delegation) design locked
+
+- Fetched + analyzed kdco/opencode-background-agents full source (1983 lines): DelegationManager lifecycle (registered→running→terminal: complete/error/timeout/cancelled), isolated session via `session.create(parentID)` + `session.prompt` with anti-recursion `tools:{task:false,delegate:false,...}`, readable ids (unique-names-generator), artifact persistence to `~/.local/share/opencode/delegations/<projectId>/<id>.md` (git-root HEAD hash scoping), persist-before-notify + terminal-state protection, terminal notify (noReply=true) + all-complete batch wake (noReply=false, quiet period + cycle tokens), small_model metadata gen w/ truncation fallback, `delegation_read` blocking reads, read-only sub-agent enforcement both directions (block task for read-only; delegate only read-only), compaction carry, chat.message buffered fallback
+- Wrote `specs/background-agents.md` (companion to background-bash.md): our conventions (file sink `[bg-agent]`, config hot-reload, testInternals, agentic harness §17) + kdco lifecycle/security lifted; deviations: (1) `delegation_cancel` tool added (kdco has none), (2) simplified generation-counter all-complete (no cycle tokens), (3) local vendored wordlist ids (no unique-names-generator dep), (4) parent-session-delete does NOT kill delegations (persistence wins)
+- Open questions recorded §18 (naming, cancel tool, unify-with-shell, detached vs parentID sessions)
+
+Remaining: decide open questions; implement `.opencode/plugins/background-agents.ts`; unit tests + D1-D10 harness scenarios
+
 ## 2026-08-12 — Fix: notifications no longer reset session agent/model (0.1.2)
 
 - **Bug**: while a session ran a non-default agent (e.g. `auto-accept`) and a model variant (e.g. `max`), a completed background job's notification silently switched the session to the default `build` agent + `default` variant
@@ -79,3 +87,14 @@ Remaining: none for v1 (spec S9 manual TUI compaction check pending)
 - 34 unit tests green, `bun x tsc --noEmit` clean
 
 Remaining: none for v1; fix is live only after tag/release consumed by `github:RohanAwhad/opencode-background-shell`
+
+## 2026-08-12 — Fix: job stdin default /dev/null; `job_stdin` config knob (0.1.3)
+
+- **Bug**: jobs spawned with `stdin: "pipe"` (Bun = socketpair) — child processes that inherit socket stdin can hang waiting for input. Observed live: `opencode run` inside a background job hung at init forever; adding `</dev/null` fixed it. Socket stdin also defeats EOF-based fail-fast for `read`-style commands.
+- **Fix**: new `job_stdin` config key — default `"devnull"` (spawn `stdin: "ignore"` → /dev/null), opt-in `"pipe"` restores the legacy open-but-silent socket. Spawn log line now carries `stdin=<mode>` (evidence contract).
+- Harness: S6 (stall watchdog) fixture now sets `job_stdin: "pipe"` (its `read line` block-on-stdin test requires the socket); new **S11** regression scenario — default mode job runs `[ -S /dev/fd/0 ]` socket probe (macOS `readlink` unreliable) + a nested `opencode run 'echo nested-opencode-ok'` and must complete (proves no socket-stdin hang). S11 waits for job exit before collecting evidence.
+- Unit tests: resolveConfig default/override for `job_stdin`; `/dev/fd/0` socket probe shows NOT_SOCKET (devnull) vs IS_SOCKET (pipe). 37 tests green.
+- Docs: spec §9.3 (stdin rationale rewritten + dated socket-stdin hazard), §11 (stdin note), §15 (config row), §18.4 (S6 fixture + S11), §20-4 (no-stdin wording); README config sample + behavior line.
+- Deployment: github-spec installs need cache refresh after push (`rm -rf ~/.cache/opencode/packages/github:RohanAwhad`).
+
+Remaining: refresh global install cache post-push; (optional) S6/S11 agentic run on this machine
