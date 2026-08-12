@@ -100,7 +100,6 @@ function log(
   const line = `${LOG_PREFIX} ${new Date().toISOString()} ${Object.entries(fields)
     .map(([k, v]) => `${k}=${v}`)
     .join(" ")}`
-  console.log(line)
   if (logFilePath) {
     try {
       appendFileSync(logFilePath, line + "\n")

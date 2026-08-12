@@ -1,6 +1,6 @@
 {
   "name": "opencode-background-shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": ".opencode/plugins/background-bash.ts",
