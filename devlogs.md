@@ -26,3 +26,19 @@ Remaining: decide fork (Path A) vs plugin (Path B); answer open questions in `do
 - Written: `specs/background-bash.md` (full I/O contracts, lifecycle, notifications, watchdog, config, security, edge cases, testing, open questions, agent assumptions)
 
 Remaining: implement plugin skeleton (registry + spawn + hooks); permission heuristic; watchdog; tests
+
+## 2026-08-11 — Implementation: plugin built + unit tests green
+
+- Scaffolded repo: package.json (bun), tsconfig with `@opencode-ai/plugin` path-mapped to vendored source, `bunfig.toml` (test root = ./test), types/vendor.d.ts SDK shim (avoids compiling vendored SDK's dep chain: effect, cross-spawn)
+- Installed bun 1.3.14 to ~/.bun/bin (was missing)
+- Built `.opencode/plugins/background-bash.ts` (single-file v1 plugin, kdco-style `Plugin = async (input, options) => ({tool, ...hooks})`):
+  - JobManager: registry, detached spawn (`Bun.spawn sh -c`, `detached: true` ⇒ setsid semantics per bun-types:6707), stdin pipe never written, stdout+stderr merged to one FileSink log file, exit/exitCode, eviction, killAll/killOwner, group-kill `kill(-pgid)` SIGTERM→5s→SIGKILL
+  - 5 tools: background_bash (permission ask, sync wait + promotion, envelopes), status, list, read (offset/tail), kill; owner-binding + root-ancestry walk via client.session.get
+  - Hooks: tool.execute.before (bash block + route_bash), config (hot reload), event (session.deleted cleanup), dispose, chat.message (buffered notify fallback), system.transform guidance, session.compacting carry
+  - Exported test internals + extracted pure helpers (askBashPermission, askExternalDirectoryPermission, waitSyncOrPromote, resolveExternalDirectories...)
+- API facts confirmed against vendored v1.18.16 source: `ctx.ask` returns Promise<void> and **deny = thrown rejection** (the one sanctioned try/catch, per spec §8); `client.session.promptAsync({path:{id}, body:{noReply,parts}})` exists (SDK gen sdk.gen.ts:4095); plugin loader accepts v1 function-style default export (getServerPlugin/readV1Plugin)
+- **Deviation found by tests**: `sh -c "unknown-command"` → exits 127 (shell semantics), NOT `failed` state — `failed` reserved for exec-level spawn errors. Spec §17 "command not found → failed" updated to reality (matches Claude Code behavior). `> /dev/null` redirection targets excluded from external-directory heuristic
+- 31 unit tests green: state machine, spawn/exit/127, kill+cancelled, eviction, killOwner scoping, watchdog stall once+dedupe+survives, no-stall active output, permission payloads+deny, external-dir globs, envelopes, compaction context, read offset/tail, config, log-marker contract
+- `bun x tsc --noEmit` clean
+
+Remaining: live smoke (S1 routing, S2 happy path notify); agentic validation harness scripts/validate.ts (spec §18); README
