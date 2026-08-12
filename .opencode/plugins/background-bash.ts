@@ -394,7 +394,7 @@ class JobManager {
     job.state = "running"
     const sink = Bun.file(logPath).writer()
     job._sink = sink
-    log("info", { job: id, event: "spawn", pid: proc.pid, command: input.command, label: input.label })
+    log("info", { job: id, event: "spawn", pid: proc.pid, owner: input.owner, command: input.command, label: input.label })
 
     const pump = async (stream: ReadableStream<Uint8Array>) => {
       const reader = stream.getReader()
@@ -410,6 +410,7 @@ class JobManager {
     void proc.exited.then(async (exitCode) => {
       await pumps
       sink.end()
+      if (job.state === "cancelled") return
       job.exitCode = exitCode
       job.endedAt = Date.now()
       job.state = "exited"
@@ -432,13 +433,13 @@ class JobManager {
 
   async kill(job: Job, signal: NodeJS.Signals = "SIGTERM") {
     if (job.state !== "running" || !job.proc) return
+    job.state = "cancelled"
     signalKillGroup(job, signal)
     const exited = await Promise.race([
       job.proc.exited.then(() => true),
       sleep(KILL_GRACE_MS).then(() => false),
     ])
     if (!exited) signalKillGroup(job, "SIGKILL")
-    job.state = "cancelled"
     job.endedAt = Date.now()
     if (job._watchdog) {
       clearInterval(job._watchdog)
