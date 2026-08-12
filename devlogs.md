@@ -67,4 +67,4 @@ Remaining: agentic validation harness scripts/validate.ts (spec §18, S3-S10); R
 - **Harness robustness learnings** (harness bugs, not plugin bugs): plugin log must be reset per scenario (append-only file accumulated prior scenarios); evidence copy must wait for `event=notify kind=terminal` (FileSink flush race gave empty job logs); `pgrep -f` prints PIDs only → `-fl`; session ids are not time-ordered → S8 deletes the job owner session parsed from plugin log; S3 pgrep snapshot must anchor to `event=promote` not run-end (model sometimes polls background_read against guidance, keeping the run attached until job death); S6 dedupe assertion counts per-job (model legitimately kills + re-runs, producing 2 stalled jobs)
 - S5/S6 "text in session output" claims downgraded to INFO (model paraphrases tool results; plugin log is authoritative)
 
-Remaining: README; devlogs final; spec §17/§20 deviation updates
+Remaining: none for v1 (spec S9 manual TUI compaction check pending)

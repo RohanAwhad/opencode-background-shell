@@ -375,7 +375,7 @@ There is intentionally **no** runtime/timeout knob: background jobs have no dead
 
 | Case | Behavior |
 |---|---|
-| Command not found | Spawn fails → `failed` (no process) → terminal notification with error |
+| Command not found | `sh -c` semantics: shell starts, exits 127 → `exited` with `exitCode: 127` (matches Claude Code). `failed` is reserved for exec-level spawn errors (no process) — rare on POSIX since `sh` always exists; terminal notification carries the error |
 | Empty / whitespace command | Tool result error text, no job created |
 | Job exits instantly | Exit notification delivered normally |
 | Non-zero exit | `exited` with `exitCode` ≠ 0; notification carries it |
@@ -407,15 +407,17 @@ The validation is designed to be executed end-to-end by another agent (a second 
 ```bash
 # Prerequisites: bun, opencode CLI installed; provider auth exists on this machine
 SCRATCH=$(mktemp -d /tmp/bgval-XXXX)
-export XDG_CONFIG_HOME=$SCRATCH/config  XDG_CACHE_HOME=$SCRATCH/cache
-mkdir -p "$XDG_CONFIG_HOME/opencode" "$SCRATCH/project/.opencode/plugins"
-cp ~/.config/opencode/auth.json "$XDG_CONFIG_HOME/opencode/auth.json"   # keep provider access, drop global config
-ln -s <repo>/.opencode/plugins/background-bash.ts "$SCRATCH/project/.opencode/plugins/background-bash.ts"
-# project opencode.json: plugin config fixture (test timers, route_bash: true), permission fixtures, model pinning
+export XDG_CONFIG_HOME=$SCRATCH/config  XDG_CACHE_HOME=$SCRATCH/cache  XDG_DATA_HOME=$SCRATCH/data
+mkdir -p "$XDG_CONFIG_HOME/opencode" "$SCRATCH/project"
+cp ~/.local/share/opencode/auth.json "$XDG_CONFIG_HOME/opencode/auth.json"   # keep provider access, drop global config (auth may also live at ~/.config/opencode/auth.json)
+# project opencode.json declares the plugin as a config tuple so options can be passed:
+#   "plugin": [["file://<repo>/.opencode/plugins/background-bash.ts", {"background_bash": {...test timers...}}]]
 opencode --version   # sanity: binary runs in isolated env
 ```
 
-The harness script `scripts/validate.ts` (bun) performs this bootstrap, runs §18.4 scenarios, and collects evidence into `logs/validate/` (per-scenario stdout, plugin log snapshot, pgrep snapshots, job log files), then writes `logs/validate/VALIDATION-REPORT.md` with per-scenario verdicts + citations.
+Implemented deviation from the spec's symlink bootstrap: the harness declares the plugin via the config `plugin` tuple (symlinking into `.opencode/plugins/` auto-loads it WITHOUT options, and options are required for test timers + scratch output_dir). Both loading forms work for end users.
+
+The harness script `scripts/validate.ts` (bun) performs this bootstrap, runs §18.4 scenarios, and collects evidence into `logs/validate/` (per-scenario stdout, plugin log snapshot, pgrep snapshots, job log files), then writes `logs/validate/VALIDATION-REPORT.md` with per-scenario verdicts + citations. It runs scenarios against a persistent server (`opencode serve` + `opencode run --attach`) because a plain `opencode run` exits when the model's turn ends and `dispose` kills running jobs.
 
 ### 18.3 What the agent runs
 
@@ -432,12 +434,12 @@ cd <repo> && bun run scripts/validate.ts --scratch "$SCRATCH"
 | S1 | Bash routing block | `opencode run "list the files in this project using the bash tool"` | Session stdout contains the guidance error (`[bash intercepted] Use background_bash...`); plugin log has `event=block tool=bash`; **no** `event=permit` for that call; builtin bash never executed (no command output besides guidance) | All 3 evidence lines present |
 | S2 | Background happy path + exit notify | `opencode run "run 'sleep 2 && echo VALTAG_1 done' in background, then stop and wait for my notification"` | Tool result contains `task-id=bg_...`; plugin log `event=spawn`, then `event=exit exitCode=0`, then `event=notify status=exited`; session stdout contains `<task-notification>` with the job id; job log contains `VALTAG_1 done` | spawn→exit→notify sequence, ids match, notification visible to model |
 | S3 | Sync mode + auto-promotion | Test config `sync_wait_ms: 5000`; prompt: `background_bash(command="sleep 30 && echo VALTAG_2", run_in_background=false)` | Result is running-state with `auto-promoted` note; plugin log `event=promote`; at t+35s `pgrep -f VALTAG_2` alive; later `event=exit` + `event=notify` | Promote logged, process alive mid-job, exit+notify after |
-| S4 | Permission reuse (allow) | Fixture: `permission: {"bash": {"echo VALTAG_3 *": "allow"}}`; prompt runs `background_bash(command="echo VALTAG_3 ok")` | No prompt (headless would fail otherwise); plugin log `event=permit via=config`; job runs and exits | Permit logged, job completes |
-| S5 | Permission deny | Fixture: `permission: {"bash": {"*rm*": "deny"}}`; prompt runs `background_bash(command="rm -rf /tmp/VALTAG_4")` | Tool result contains `[PERMISSION_DENIED]`; plugin log `event=deny`; **no** `event=spawn` for that command | Deny logged, no spawn |
+| S4 | Permission reuse (allow) | Fixture: `permission: {"bash": {"echo VALTAG_3 *": "allow"}}`; prompt runs `background_bash(command="echo VALTAG_3 ok")` | No prompt (headless would fail otherwise); plugin log `event=permit via=bash` (grant source is not distinguishable from the ask outcome); job runs and exits | Permit logged, job completes |
+| S5 | Permission deny | Fixture: `permission: {"bash": {"*rm*": "deny"}}`; prompt runs `background_bash(command="rm -rf /tmp/VALTAG_4")` | Tool result contains `[PERMISSION_DENIED]`; plugin log `event=deny via=bash`; **no** `event=spawn` for that command (model may paraphrase the result text in session output — plugin log is authoritative) | Deny logged, no spawn |
 | S6 | Stall watchdog | Prompt runs `background_bash(command="read line && echo got \$line")` (stdin open-but-silent ⇒ blocks) | Within ~stall_threshold+watchdog interval: plugin log `event=stall` once; session stdout contains `<status>stalled</status>` with re-run advice; `pgrep` shows process **still alive** (watchdog never kills) | Stall fires once, process survives |
 | S7 | Cancel | Prompt runs `background_bash(command="sleep 60")` then `background_kill(job_id=...)` | `event=kill` logged; job state `cancelled` via `background_status`; **no** completion notification (`event=notify status=cancelled` absent); `pgrep` dead within kill grace (5 s) | Killed group, no terminal notify |
 | S8 | Session cleanup | Prompt starts a long job, then agent deletes the session (`client.session.delete` via SDK from the harness); or start job in a session and `session.delete` it | Plugin log `event=cleanup session=<id>`, then `event=kill` per job; `pgrep` dead within grace | All jobs dead after session deletion |
-| S9 | Compaction carry | Fixture `compaction: {auto: true, buffer: <model context − 1000>}` so auto-compaction fires within a few turns; start job, then continue chatting until compact; read compacted summary | Compacted summary contains the running job's id/label (from §13 injection); `event=notify` for the job still delivered after compaction (buffered if needed) | Job context in summary; post-compaction notify works |
+| S9 | Compaction carry | Fixture `compaction: {auto: true, reserved: <model context − 1000>}` so auto-compaction fires within a few turns (v1 `reserved` migrates to v2 `buffer`); start job, then continue chatting until compact; read compacted summary | Compacted summary contains the running job's id/label (from §13 injection); `event=notify` for the job still delivered after compaction (buffered if needed) | Job context in summary; post-compaction notify works. **Headless SKIP-with-reason on this machine**: no model in the local models.dev catalog carries `limits.context` (e.g. openai/gpt-4o-mini `limits: {}` in ~/.cache/opencode/models.json), and core's `compactIfNeeded` returns false when `context === undefined` (`packages/core/src/session/compaction.ts`) — auto-compaction cannot trigger. Unit tests cover `buildCompactionContext`; manual TUI verification documented |
 | S10 | Kill-switch | Fixture `route_bash: false`; prompt: `list the files using the bash tool` | No guidance error; command output present; plugin log **no** `event=block` | Bash executes normally |
 
 Sequencing note: S1 must run first (proves routing), S10 last (proves escape hatch). Each scenario is a fresh `opencode run` invocation in the scratch project so state does not leak; S6 runs last in the timed block because it intentionally takes ~10 s.
