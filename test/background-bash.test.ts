@@ -219,6 +219,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     endedAt: null,
     stallNotifiedAt: null,
     notificationSentAt: null,
+    notifyOnExit: true,
     bytes: 0,
     spawnError: null,
     proc: null,
@@ -363,6 +364,62 @@ describe("JobManager spawn/lifecycle", () => {
     await waitFor(() => mine.state === "cancelled")
     expect(theirs.state).toBe("running")
     await manager.kill(theirs)
+  })
+
+  test("background job (notifyOnExit default true) notifies on exit", async () => {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
+    let notifyCount = 0
+    const job = await manager.spawn(
+      { command: "echo bg-notify", workdir: dir, label: "n", owner: "s1" },
+      (j) => {
+        notifyCount++
+        if (j.notificationSentAt === null) j.notificationSentAt = Date.now()
+        return Promise.resolve()
+      },
+      () => {},
+    )
+    await waitFor(() => job.state === "exited")
+    expect(notifyCount).toBe(1)
+    expect(job.notificationSentAt).not.toBeNull()
+  })
+
+  test("sync job (notifyOnExit false) suppresses notification and marks seen", async () => {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
+    let notifyCount = 0
+    const job = await manager.spawn(
+      { command: "echo sync-inline", workdir: dir, label: "n", owner: "s1", notifyOnExit: false },
+      () => {
+        notifyCount++
+        return Promise.resolve()
+      },
+      () => {},
+    )
+    await waitFor(() => job.state === "exited")
+    expect(notifyCount).toBe(0)
+    expect(job.notificationSentAt).not.toBeNull()
+  })
+
+  test("promoted sync job re-enables notifyOnExit and notifies after exit", async () => {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
+    let notifyCount = 0
+    const job = await manager.spawn(
+      { command: "sleep 3", workdir: dir, label: "n", owner: "s1", notifyOnExit: false },
+      (j) => {
+        notifyCount++
+        if (j.notificationSentAt === null) j.notificationSentAt = Date.now()
+        return Promise.resolve()
+      },
+      () => {},
+    )
+    const outcome = await waitSyncOrPromote(job, 100, new AbortController().signal)
+    expect(outcome).toBe("promote")
+    job.notifyOnExit = true
+    await waitFor(() => job.state === "exited")
+    expect(notifyCount).toBe(1)
+    expect(job.notificationSentAt).not.toBeNull()
   })
 })
 

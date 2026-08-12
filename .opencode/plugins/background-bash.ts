@@ -79,6 +79,7 @@ export type Job = {
   endedAt: number | null
   stallNotifiedAt: number | null
   notificationSentAt: number | null
+  notifyOnExit: boolean
   bytes: number
   spawnError: string | null
   proc: import("bun").Subprocess<"pipe" | "ignore", "pipe", "pipe"> | null
@@ -353,7 +354,7 @@ class JobManager {
   }
 
   async spawn(
-    input: { command: string; workdir: string; label: string; owner: string },
+    input: { command: string; workdir: string; label: string; owner: string; notifyOnExit?: boolean },
     notify: (job: Job) => Promise<void>,
     watch: (job: Job) => void,
   ): Promise<Job> {
@@ -376,6 +377,7 @@ class JobManager {
       endedAt: null,
       stallNotifiedAt: null,
       notificationSentAt: null,
+      notifyOnExit: input.notifyOnExit !== false,
       bytes: 0,
       spawnError: null,
       proc: null,
@@ -399,7 +401,8 @@ class JobManager {
       job.state = "failed"
       job.endedAt = Date.now()
       log("error", { job: id, event: "spawn", ok: "false", reason: job.spawnError })
-      void notify(job)
+      if (job.notifyOnExit) void notify(job)
+      else job.notificationSentAt = Date.now()
       return job
     }
 
@@ -439,7 +442,8 @@ class JobManager {
       this.completedOrder.push(id)
       this.evictIfNeeded()
       log("info", { job: id, event: "exit", exitCode })
-      await notify(job)
+      if (job.notifyOnExit) await notify(job)
+      else job.notificationSentAt = Date.now()
     })
 
     watch(job)
@@ -716,7 +720,7 @@ const BackgroundShellPlugin: Plugin = async (input, options) => {
         const workdir = args.workdir ? path.resolve(ctx.directory, args.workdir) : ctx.directory
         const label = args.label ?? command
         const job = await manager.spawn(
-          { command, workdir, label, owner: ctx.sessionID },
+          { command, workdir, label, owner: ctx.sessionID, notifyOnExit: args.run_in_background !== false },
           (j) => notifyOwner(j, buildTerminalNotification(j), false, "terminal"),
           watch,
         )
@@ -730,6 +734,7 @@ const BackgroundShellPlugin: Plugin = async (input, options) => {
         if (!args.run_in_background) {
           const outcome = await waitSyncOrPromote(job, manager.getConfig().sync_wait_ms, ctx.abort)
           if (outcome === "promote") {
+            job.notifyOnExit = true
             log("info", { job: job.id, event: "promote", sync_wait_ms: manager.getConfig().sync_wait_ms })
             await notifyOwner(job, buildRunningResult(job, `auto-promoted to background after ${manager.getConfig().sync_wait_ms}ms`), true, "promote")
             return {

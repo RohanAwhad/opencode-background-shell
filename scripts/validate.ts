@@ -10,7 +10,7 @@ const DEFAULT_MODEL = process.env.VALIDATE_MODEL ?? "openai/gpt-4o-mini"
 const RUN_TIMEOUT_MS = 90_000
 const SCENARIO_TIMEOUT_MS = 120_000
 
-type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10" | "S11"
+type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10" | "S11" | "S12"
 
 type Scenario = {
   id: ScenarioId
@@ -305,6 +305,25 @@ const scenarios: Scenario[] = [
     },
   },
   {
+    id: "S12",
+    name: "Sync quick exit → no terminal notification",
+    config: {},
+    prompt: "Run 'echo VALTAG_12 done' via background_bash with run_in_background=false. Report what the tool returned.",
+    expect: (e) => {
+      const claims: string[] = []
+      const spawn = grepLines(e.pluginLog, /event=spawn .* command=echo VALTAG_12/)
+      if (spawn.length > 0) claims.push(`PASS: job spawned (${e.pluginLog}:${spawn[0].line})`)
+      else claims.push("FAIL: no spawn for VALTAG_12")
+      const inline = grepLines(e.sessionLog, /VALTAG_12 done/)
+      if (inline.length > 0) claims.push(`PASS: output returned inline (${e.sessionLog}:${inline[0].line})`)
+      else claims.push("FAIL: VALTAG_12 done not in session output")
+      const notify = grepLines(e.pluginLog, /event=notify/)
+      if (notify.length === 0) claims.push("PASS: no notification for sync-completed job")
+      else claims.push(`FAIL: notification delivered for sync job (${e.pluginLog}:${notify[0].line})`)
+      return claims
+    },
+  },
+  {
     id: "S5",
     name: "Permission deny",
     config: {
@@ -557,6 +576,9 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
   }
   if (scenario.id === "S6") {
     await Bun.sleep(12_000)
+  }
+  if (scenario.id === "S12") {
+    await Bun.sleep(3000)
   }
   if (scenario.id === "S11") {
     const spawnLines = grepLines(projectLog, /event=spawn .* command=echo S11_JOB_STARTED/)

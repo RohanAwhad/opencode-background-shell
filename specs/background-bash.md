@@ -126,6 +126,8 @@ Run a shell command, in the background by default.
 
 **Output (sync mode)** — on completion within `sync_wait_ms`: same shape as OpenCode bash result, `state: "exited"`, `output` = captured stdout+stderr, `metadata.exitCode`. On promotion (exceeded `sync_wait_ms`): same shape as background mode plus `"note": "auto-promoted to background after <sync_wait_ms>ms"`.
 
+**Notifications (sync mode)**: a job that completes within the sync window receives **no** terminal notification — the inline tool result IS the notification (the model already has the output and exit code). A promoted job re-enables the exit notification: the result promises "you WILL be notified", so the terminal notification is delivered after exit (see §9.4).
+
 **Errors** (returned as tool result text, not thrown — consistent with OpenCode plugin tool conventions): empty command; permission denied (`[PERMISSION_DENIED] <reason>`); spawn failure (`command not found` etc. — job is `failed`).
 
 ### 6.2 `background_status`
@@ -235,6 +237,7 @@ pgid        process group id (detached spawn ⇒ pid == pgid, unless the child s
 logPath     <output_dir>/<owner session>/<jobID>.log
 state       running | exited | failed | cancelled
 exitCode    number | null
+notifyOnExit  whether a terminal notification is delivered on exit (false for sync-window completions; re-enabled on promotion)
 startedAt, endedAt, stallNotifiedAt (dedupe for watchdog)
 bytes       bytes written to log
 ```
@@ -249,13 +252,14 @@ bytes       bytes written to log
 ### 9.4 Foreground (sync) wait and promotion
 
 - `run_in_background: false`: wait on exit, racing a `sync_wait_ms` timer (default 60 000 ms, configurable).
-- Timer fires while process still running → **promote**: stop waiting, return the running-state result, mark the job backgrounded. The process is untouched. Completion notification will arrive later.
+- Timer fires while process still running → **promote**: stop waiting, return the running-state result, mark the job backgrounded, and **re-enable the exit notification** (the result promises "you WILL be notified"). The process is untouched. Completion notification will arrive later.
+- **Sync completion (exit within `sync_wait_ms`): no terminal notification** — the inline result already carries output + exit code; the job is marked seen (`notificationSentAt`) so compaction does not carry it as "terminal-but-unnotified" (§13).
 - This is the "timeout → background rescue" from Claude Code, implemented plugin-side. The promotion ceiling is a UX knob, **not** a job timeout: promoted jobs have no deadline.
 - Abort signal (`ToolContext.abort`, user esc) during the sync wait → promote to background (abort never kills).
 
 ### 9.5 Exit handling
 
-`process.exited` resolves → write final bytes → record `exitCode` → state `exited` → deliver terminal notification (§10).
+`process.exited` resolves → write final bytes → record `exitCode` → state `exited` → deliver terminal notification **unless `notifyOnExit` is false** (sync-window completion; the outcome was already returned inline — the job is marked seen instead of notified) (§10).
 
 ## 10. Notifications
 
@@ -269,7 +273,8 @@ Delivered via `client.session.promptAsync({ path: { id: <owner session> }, body:
 
 | Event | `noReply` | Effect |
 |---|---|---|
-| Job exited / failed (terminal) | `false` | Wakes the model; a new turn processes the notification |
+| Job exited / failed (terminal, background mode) | `false` | Wakes the model; a new turn processes the notification |
+| Sync-window completion (output returned inline) | — | **Never delivered** — the tool result is the notification (§6.1, §9.4) |
 | Stall detected | `true` | Injected as context; does not force a new turn |
 | Auto-promotion | `true` | Informational |
 
@@ -394,10 +399,11 @@ There is intentionally **no** runtime/timeout knob: background jobs have no dead
 
 | Case | Behavior |
 |---|---|
-| Command not found | `sh -c` semantics: shell starts, exits 127 → `exited` with `exitCode: 127` (matches Claude Code). `failed` is reserved for exec-level spawn errors (no process) — rare on POSIX since `sh` always exists; terminal notification carries the error |
+| Command not found | `sh -c` semantics: shell starts, exits 127 → `exited` with `exitCode: 127` (matches Claude Code). `failed` is reserved for exec-level spawn errors (no process) — rare on POSIX since `sh` always exists; background mode: terminal notification carries the error; sync mode: error in the inline result, no notification |
 | Empty / whitespace command | Tool result error text, no job created |
-| Job exits instantly | Exit notification delivered normally |
-| Non-zero exit | `exited` with `exitCode` ≠ 0; notification carries it |
+| Job exits instantly | Background mode: exit notification delivered normally. Sync mode: output returned inline, no notification (§9.4) |
+| Sync quick exit (`run_in_background: false` + exit within `sync_wait_ms`) | Output + exit code inline; **no** terminal notification; job marked seen for compaction |
+| Non-zero exit | `exited` with `exitCode` ≠ 0; background mode: notification carries it; sync mode: inline result carries it, no notification |
 | User esc during sync wait | Promote to background; process untouched |
 | Session deleted with running jobs | All owned jobs killed, records evicted |
 | Plugin reload | Registry lost; running detached processes orphan (see §20) |
@@ -455,6 +461,7 @@ cd <repo> && bun run scripts/validate.ts --scratch "$SCRATCH"
 | S2 | Background happy path + exit notify | `opencode run "run 'sleep 2 && echo VALTAG_1 done' in background, then stop and wait for my notification"` | Tool result contains `task-id=bg_...`; plugin log `event=spawn`, then `event=exit exitCode=0`, then `event=notify status=exited`; session stdout contains `<task-notification>` with the job id; job log contains `VALTAG_1 done` | spawn→exit→notify sequence, ids match, notification visible to model |
 | S3 | Sync mode + auto-promotion | Test config `sync_wait_ms: 5000`; prompt: `background_bash(command="sleep 30 && echo VALTAG_2", run_in_background=false)` | Result is running-state with `auto-promoted` note; plugin log `event=promote`; at t+35s `pgrep -f VALTAG_2` alive; later `event=exit` + `event=notify` | Promote logged, process alive mid-job, exit+notify after |
 | S4 | Permission reuse (allow) | Fixture: `permission: {"bash": {"echo VALTAG_3 *": "allow"}}`; prompt runs `background_bash(command="echo VALTAG_3 ok")` | No prompt (headless would fail otherwise); plugin log `event=permit via=bash` (grant source is not distinguishable from the ask outcome); job runs and exits | Permit logged, job completes |
+| S12 | Sync quick exit → no terminal notification | Prompt runs `background_bash(command="echo VALTAG_12 done", run_in_background=false)` (fast command, completes within default `sync_wait_ms`) | Tool result contains the inline output `VALTAG_12 done`; plugin log `event=spawn` + `event=exit`, and **zero** `event=notify` lines across the whole scenario (3 s settle grace before log snapshot — a buggy redundant notify would land within that window); job log contains `VALTAG_12 done` | Inline output visible, no notification of any kind |
 | S5 | Permission deny | Fixture: `permission: {"bash": {"*rm*": "deny"}}`; prompt runs `background_bash(command="rm -rf /tmp/VALTAG_4")` | Tool result contains `[PERMISSION_DENIED]`; plugin log `event=deny via=bash`; **no** `event=spawn` for that command (model may paraphrase the result text in session output — plugin log is authoritative) | Deny logged, no spawn |
 | S6 | Stall watchdog | Fixture `job_stdin: "pipe"` (legacy open-but-silent socket); prompt runs `background_bash(command="read line && echo got \$line")` (stdin open-but-silent ⇒ blocks) | Within ~stall_threshold+watchdog interval: plugin log `event=stall` once; session stdout contains `<status>stalled</status>` with re-run advice; `pgrep` shows process **still alive** (watchdog never kills) | Stall fires once, process survives |
 | S7 | Cancel | Prompt runs `background_bash(command="sleep 60")` then `background_kill(job_id=...)` | `event=kill` logged; job state `cancelled` via `background_status`; **no** completion notification (`event=notify status=cancelled` absent); `pgrep` dead within kill grace (5 s) | Killed group, no terminal notify |
@@ -463,7 +470,7 @@ cd <repo> && bun run scripts/validate.ts --scratch "$SCRATCH"
 | S10 | Kill-switch | Fixture `route_bash: false`; prompt: `list the files using the bash tool` | No guidance error; command output present; plugin log **no** `event=block` | Bash executes normally |
 | S11 | Devnull stdin (nested opencode run) | Default fixture (`job_stdin` unset); prompt runs `background_bash(command="echo S11_JOB_STARTED && ([ -S /dev/fd/0 ] && echo S11_STDIN_SOCKET || echo S11_STDIN_DEVNULL) && opencode run 'echo nested-opencode-ok'; echo S11_JOB_EXIT:\$?")` | Spawn line logs `stdin=devnull`; job log contains `S11_STDIN_DEVNULL` (POSIX `-S` socket test on `/dev/fd/0` — portable, macOS `readlink` is unreliable); nested `opencode run` output in job log (completes — no socket-stdin hang); job exits `S11_JOB_EXIT:0` | stdin=devnull logged; no socket stdin; nested run completes; exit 0 |
 
-Sequencing note: S1 must run first (proves routing), S10 near the end (proves escape hatch), S11 last (slow — nested `opencode run` makes a second model call). Each scenario is a fresh `opencode run` invocation in the scratch project so state does not leak; S6 runs last in the timed block because it intentionally takes ~10 s.
+Sequencing note: S1 must run first (proves routing), S10 near the end (proves escape hatch), S11 last (slow — nested `opencode run` makes a second model call). S12 sits in the fast block after S4 (both complete in one turn). Each scenario is a fresh `opencode run` invocation in the scratch project so state does not leak; S6 runs last in the timed block because it intentionally takes ~10 s.
 
 ### 18.5 Evidence artifacts
 
@@ -485,7 +492,7 @@ rm -rf "$SCRATCH"
 
 ### 18.8 Unit tests (bun test, repo-local, no live TUI)
 
-State machine transitions; spawn/exit/failed paths; promotion on `sync_wait_ms` (fake timers); permission ask payloads (mock `ctx.ask`, assert `permission: "bash"` + command pattern); external-directory heuristic (in/out of project root cases); watchdog stall detection (fake timers + fixture log tail) incl. dedupe and prompt-pattern regexes; notification envelope formatting + `noReply` flags; buffered-notification fallback (chat.message injection); registry eviction; session-deleted cleanup (mock kill); log-marker contract (each `event=` line greppable).
+State machine transitions; spawn/exit/failed paths; promotion on `sync_wait_ms` (fake timers); `notifyOnExit` gating (background default notifies on exit; sync job suppresses + marks seen; promoted sync job re-enables and notifies); permission ask payloads (mock `ctx.ask`, assert `permission: "bash"` + command pattern); external-directory heuristic (in/out of project root cases); watchdog stall detection (fake timers + fixture log tail) incl. dedupe and prompt-pattern regexes; notification envelope formatting + `noReply` flags; buffered-notification fallback (chat.message injection); registry eviction; session-deleted cleanup (mock kill); log-marker contract (each `event=` line greppable).
 
 ## 19. Open questions
 
@@ -509,7 +516,7 @@ Assumptions not specified in this session or the research docs. Read these befor
 8. **`promptAsync` availability**: `client.session.promptAsync` exists on the plugin SDK client (verified `packages/opencode/src/server/routes/.../session.ts`) and `noReply` semantics are: `false` → model is woken/responds, `true` → message admitted without forcing a turn. Assumed stable on the pinned opencode version.
 9. **Concurrency**: multiple simultaneous jobs per session are allowed; no global concurrency limit is imposed (per-session default cap is `max_completed_jobs` only — retention, not runtime). If the user wants a runtime cap, that's a new decision.
 10. **Output file naming/location**: `~/.local/share/opencode/background-bash/<session>/<jobID>.log`, stdout+stderr merged. Chosen to match kdco's persistence location convention (`~/.local/share/opencode/...`) rather than project-tmp (session-scoped). If the user prefers project-tmp, flip it — it's a one-line config default.
-11. **Exit notification is always delivered even for non-zero exits** (it's the only way the model learns the outcome). `noReply: false` means each completed job costs one model turn. If the user finds this chatty, add a "notify on exit code != 0 only" knob — not in this spec.
+11. **Exit notification is delivered for background-mode jobs even for non-zero exits** (it's the only way the model learns the outcome of a backgrounded job). Sync-window completions are the exception: output + exit code come back inline, so no notification is sent (§6.1, §9.4). `noReply: false` means each background completion costs one model turn. If the user finds this chatty, add a "notify on exit code != 0 only" knob — not in this spec.
 12. **The stall watchdog patterns are a conservative vendored subset** of Claude Code's list; false positives are possible and are notifications only (no kill, no cost beyond a message).
 13. **The blocking hook applies to every session** (main, subagents, all agents) — there is no per-agent exemption mechanism in the plugin API. `route_bash` is global. If per-agent exemptions are wanted, that's a new requirement.
 14. **Testing runs from this repo** (no monorepo package-dir constraints — this repo is standalone; the vendored opencode's AGENTS.md test rules do not apply here). Unit suite is `bun test`; the agentic validation harness is `scripts/validate.ts` per §18, which requires `bun`, the `opencode` CLI, and existing provider auth on the machine (copied into the isolated config home — a machine without any provider auth cannot run S1-S10 and must report that as a blocker, §18.7).

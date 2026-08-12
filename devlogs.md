@@ -98,3 +98,15 @@ Remaining: none for v1; fix is live only after tag/release consumed by `github:R
 - Deployment: github-spec installs need cache refresh after push (`rm -rf ~/.cache/opencode/packages/github:RohanAwhad`).
 
 Remaining: refresh global install cache post-push; (optional) S6/S11 agentic run on this machine
+
+## 2026-08-12 — Fix: no redundant terminal notification for sync-mode completions (0.1.4)
+
+- **Bug**: `run_in_background=false` jobs that completed within `sync_wait_ms` got BOTH the inline tool result (output + exit code) AND a `<task-notification>` — the exit handler in `spawn` called `await notify(job)` unconditionally (also the spawn-failure catch), waking the model for a redundant turn. Only promote/cancel paths were exempt.
+- **Why not a post-hoc flag**: the sync path polls with `sleep(20)` after `proc.exited` resolves while the exit handler notifies directly off the same promise — setting a flag after the race is unreliable. Fix decides at spawn time.
+- **Fix**: new `Job.notifyOnExit` (spawn input, default `true`). Exit handler: `if (job.notifyOnExit) await notify(job)` else mark `notificationSentAt` (seen → compaction won't carry it as terminal-but-unnotified). Spawn-failure catch gated the same way. `execute` passes `notifyOnExit: args.run_in_background !== false`; the **promote path re-enables it** (`job.notifyOnExit = true` before the promote notification — the result promises "you WILL be notified"). Abort→promote covered by the same re-enable.
+- Unit tests: background default notifies on exit; sync job suppresses + marks seen; promoted sync job re-enables and notifies after exit (mock notify mirrors notifyOwner's dedupe/`notificationSentAt` marking — first run of the tests failed because the mocks didn't mark, fixture bug not plugin bug). 40 tests green, tsc clean.
+- Harness: new **S12** — `echo VALTAG_12 done` with `run_in_background=false`; asserts inline output + **zero** `event=notify` lines after a 3 s settle grace (absence = the regression claim). Sits in the fast block after S4, before S10/S11 (S11 stays last — slow nested run).
+- Docs: spec §6.1 (sync-mode notification paragraph), §9.2 (`notifyOnExit` record field), §9.4 (sync completion suppresses; promotion re-enables), §9.5 (conditional exit notify), §10.1 (protocol table row), §17 (Command not found / exits instantly / new sync-quick-exit row), §18.4 (S12 + sequencing), §18.8, §20-11; README behavior bullets; package.json 0.1.4.
+- **S12 agentic run: PASS** (`logs/validate/VALIDATION-REPORT.md`, evidence `logs/validate/S12/`): plugin log line 3 `event=spawn ... command=echo VALTAG_12 done` → line 4 `event=exit exitCode=0`; session log line 8 shows the model's inline tool result (`VALTAG_12 done`); **zero** `event=notify` lines in the plugin log — no redundant wake. spawn→exit with no notify is the regression proof; the promote-path guard rail is S3 (unchanged, still asserts terminal notify after promotion).
+
+Remaining: (optional) full S1-S11 re-run on this machine; cache refresh post-push
