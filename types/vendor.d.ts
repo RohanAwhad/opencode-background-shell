@@ -7,7 +7,11 @@ declare module "@opencode-ai/sdk" {
   export type Project = Record<string, unknown>
   export type Model = Record<string, unknown>
   export type Provider = Record<string, unknown>
-  export type SessionInfo = { parentID?: string } & Record<string, unknown>
+  export type SessionInfo = {
+    parentID?: string
+    agent?: string
+    model?: { id: string; providerID: string; variant?: string }
+  } & Record<string, unknown>
   export type Event = {
     type: string
     properties: { sessionID?: string; info?: SessionInfo } & Record<string, unknown>
@@ -19,7 +23,13 @@ declare module "@opencode-ai/sdk" {
     session: {
       promptAsync(options: {
         path: { id: string }
-        body: { noReply?: boolean; parts: TextPartInput[] }
+        body: {
+          noReply?: boolean
+          agent?: string
+          model?: { providerID: string; modelID: string }
+          variant?: string
+          parts: TextPartInput[]
+        }
       }): Promise<unknown>
       get(options: { path: { id: string } }): Promise<{ data?: SessionInfo }>
     }

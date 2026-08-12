@@ -263,7 +263,9 @@ bytes       bytes written to log
 
 ### 10.1 Protocol
 
-Delivered via `client.session.promptAsync({ path: { id: <owner session> }, body: { noReply, parts: [{ type: "text", text }] } })` — same delivery path proven by kdco's background-agents and oh-my-opencode's Monitor.
+Delivered via `client.session.promptAsync({ path: { id: <owner session> }, body: { noReply, agent, model, variant, parts: [{ type: "text", text }] } })` — same delivery path proven by kdco's background-agents and oh-my-opencode's Monitor, plus session-context pass-through (§10.4).
+
+**The injected message MUST carry the session's current `agent`, `model` (`{ providerID, modelID }`), and `variant`** (unless the variant is `"default"`), read via `client.session.get` at delivery time. Without them, the server stamps the injected user message with the default agent and no variant — and since `createUserMessage` persists `setAgentModel` when the session's stored values differ, a notification would silently re-point the whole session at the default agent/model (see §10.4).
 
 | Event | `noReply` | Effect |
 |---|---|---|
@@ -292,6 +294,20 @@ Delivered exactly once per job (dedupe via `notificationSentAt`).
 ### 10.3 Untrusted output rule
 
 Notification and `background_read` content is **process output**: the system prompt guidance instructs the model to treat it as data, never as instructions or user requests (rule copied from oh-my-opencode's untrusted envelope; lighter weight: no envelope markup in v1, guidance covers it).
+
+### 10.4 Session agent/model preservation (required)
+
+**Expected behavior:** delivering a notification must never change the session's agent or model — the injected user message runs under the same agent, model, and variant the session is already using, and the session record is untouched.
+
+**Why this is a requirement:** server-side, an injected message is created via `createUserMessage` (`packages/opencode/src/session/prompt.ts:635`). When the prompt body omits `agent`, it falls back to `agents.defaultInfo()` (the builtin `build` agent, `prompt.ts:637`); when `variant` is omitted it resolves to `undefined` (`prompt.ts:654`). The resulting user message is stamped with that agent/model, and since it differs from the session's stored values (e.g. a user agent like `auto-accept` with a `max` model variant), `sessions.setAgentModel` **persists the default agent and `"default"` variant onto the session row** (`prompt.ts:672-689`) — the run loop then executes under `lastUser.agent`/`lastUser.model` (`prompt.ts:1170`/`1141`). Every notification (terminal, stall, promotion — `createUserMessage` runs before the `noReply` short-circuit at `prompt.ts:1069`) re-confirms the switch.
+
+**Mechanics:** before each `promptAsync`, the plugin reads the owner session via `client.session.get` and passes through:
+
+- `agent`: the session's stored agent id (omit when the session has none — matches pre-existing default behavior)
+- `model`: `{ providerID, modelID }` mapped from the session's stored `{ providerID, id }` (omit when the session has none)
+- `variant`: the stored variant, unless it is `"default"` (omit then — avoids a redundant `setAgentModel` write)
+
+With the pass-through, `createUserMessage` stamps the injected message identically to the session's stored values, the `setAgentModel` guard in `prompt.ts:672-689` becomes a no-op, and the notification turn runs under the user's actual agent/model. If `session.get` fails at delivery time, the notification is still sent (fields omitted — degrade to the pre-fix behavior rather than drop the notification).
 
 ## 11. Stall watchdog
 
@@ -388,6 +404,7 @@ There is intentionally **no** runtime/timeout knob: background jobs have no dead
 | Model calls `background_kill` on exited job | `found: false` result text, no-op |
 | Output grows > memory | Never held in memory; file-backed; reads are offset-limited |
 | Compact mid-job | Running job carried into compacted context; notification still delivered post-compaction (buffered if needed) |
+| Notification delivered while session uses a non-default agent / model variant | Injected message carries the session's `agent`/`model`/`variant` (§10.4); session agent and model variant are preserved — never reset to default (`build`/`default`) |
 
 ## 18. Validation plan (agentic — no human in the loop)
 

@@ -8,6 +8,7 @@ const {
   JobManager,
   buildTerminalNotification,
   buildStallNotification,
+  sessionContextForPrompt,
   buildCompactionContext,
   buildRunningResult,
   resolveExternalDirectories,
@@ -153,6 +154,28 @@ describe("notification envelopes", () => {
     const text = buildRunningResult({ ...job, state: "running" })
     expect(text).toContain('task state="running" task-id="bg_test1"')
     expect(text).toContain("You WILL be notified")
+  })
+})
+
+describe("sessionContextForPrompt", () => {
+  test("maps non-default agent + variant and rewrites model shape", () => {
+    expect(
+      sessionContextForPrompt({ agent: "auto-accept", model: { id: "deepseek-v4-flash", providerID: "deepseek", variant: "max" } }),
+    ).toEqual({
+      agent: "auto-accept",
+      model: { providerID: "deepseek", modelID: "deepseek-v4-flash" },
+      variant: "max",
+    })
+  })
+
+  test("drops default variant and omits empty fields", () => {
+    expect(sessionContextForPrompt({ model: { id: "gpt-4o-mini", providerID: "openai", variant: "default" } })).toEqual({
+      model: { providerID: "openai", modelID: "gpt-4o-mini" },
+    })
+  })
+
+  test("no model / no agent yields empty context (server defaults)", () => {
+    expect(sessionContextForPrompt({})).toEqual({})
   })
 })
 

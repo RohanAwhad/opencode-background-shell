@@ -10,7 +10,8 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "paths": {
-      "@opencode-ai/plugin": ["./external_libs/opencode/packages/plugin/src/index.ts"]
+      "@opencode-ai/plugin": ["./external_libs/opencode/packages/plugin/src/index.ts"],
+      "zod": ["./node_modules/zod"]
     }
   },
   "include": [".opencode/plugins/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]

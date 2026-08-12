@@ -221,6 +221,19 @@ function buildStallNotification(job: Job): string {
   ].join("\n")
 }
 
+function sessionContextForPrompt(info: {
+  agent?: string
+  model?: { id: string; providerID: string; variant?: string }
+}): { agent?: string; model?: { providerID: string; modelID: string }; variant?: string } {
+  if (!info.model) return { agent: info.agent }
+  const variant = info.model.variant !== "default" ? info.model.variant : undefined
+  return {
+    agent: info.agent,
+    model: { providerID: info.model.providerID, modelID: info.model.id },
+    variant,
+  }
+}
+
 const GUIDANCE_LINES = [
   "## Background shell execution",
   "- The builtin `bash` tool is intercepted by the opencode-background-shell plugin. Use `background_bash` for all shell work.",
@@ -632,11 +645,21 @@ const BackgroundShellPlugin: Plugin = async (input, options) => {
   async function deliverNotification(owner: string, text: string, noReply: boolean) {
     let sent = false
     try {
+      let agent: string | undefined
+      let model: { providerID: string; modelID: string } | undefined
+      let variant: string | undefined
+      try {
+        const info = (await client.session.get({ path: { id: owner } })).data
+        const ctx = sessionContextForPrompt(info ?? {})
+        agent = ctx.agent
+        model = ctx.model
+        variant = ctx.variant
+      } catch {}
       await Promise.race([
         client.session
           .promptAsync({
             path: { id: owner },
-            body: { noReply, parts: [{ type: "text", text }] },
+            body: { noReply, agent, model, variant, parts: [{ type: "text", text }] },
           })
           .then(() => {
             sent = true
@@ -865,6 +888,7 @@ export type TestInternals = {
   JobManager: typeof JobManager
   buildTerminalNotification: typeof buildTerminalNotification
   buildStallNotification: typeof buildStallNotification
+  sessionContextForPrompt: typeof sessionContextForPrompt
   buildCompactionContext: typeof buildCompactionContext
   buildRunningResult: typeof buildRunningResult
   resolveExternalDirectories: typeof resolveExternalDirectories
@@ -889,6 +913,7 @@ export default Object.assign(BackgroundShellPlugin, {
     JobManager,
     buildTerminalNotification,
     buildStallNotification,
+    sessionContextForPrompt,
     buildCompactionContext,
     buildRunningResult,
     resolveExternalDirectories,

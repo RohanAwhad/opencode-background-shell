@@ -68,3 +68,14 @@ Remaining: agentic validation harness scripts/validate.ts (spec §18, S3-S10); R
 - S5/S6 "text in session output" claims downgraded to INFO (model paraphrases tool results; plugin log is authoritative)
 
 Remaining: none for v1 (spec S9 manual TUI compaction check pending)
+
+## 2026-08-12 — Fix: notifications no longer reset session agent/model (0.1.2)
+
+- **Bug**: while a session ran a non-default agent (e.g. `auto-accept`) and a model variant (e.g. `max`), a completed background job's notification silently switched the session to the default `build` agent + `default` variant
+- **Root cause** (open-code traced, not doc-trusted): plugin's `deliverNotification` called `promptAsync` with only `{ noReply, parts }`. Server-side `createUserMessage` (`packages/opencode/src/session/prompt.ts:635`): absent `input.agent` → `agents.defaultInfo()` = `build` (:637); absent `variant` → `undefined` (:654); since stored session values differ, `sessions.setAgentModel` **persists** build/default onto the session row (:672-689). Loop then runs under `lastUser.agent`/`lastUser.model` (:1170/:1141). `createUserMessage` runs before the `noReply` short-circuit (:1069) so terminal/stall/promotion notifications ALL corrupted the session
+- **Why validation missed it**: harness S1-S10 all run fresh default-agent sessions where build/default is a no-op
+- **Fix**: `deliverNotification` now reads the owner session via `client.session.get` and passes `agent`, `model {providerID,modelID}`, `variant` (unless `"default"`) through in the `promptAsync` body → `setAgentModel` guard becomes a no-op; session agent/model preserved. Degrades gracefully (fields omitted) if `session.get` fails. Extracted pure helper `sessionContextForPrompt` (exported via testInternals) + 3 unit tests; spec §10.4 + §17 updated
+- **tsc fix (pre-existing env issue)**: `.opencode/node_modules` (gitignored) shadows zod v4.1.8 while vendored plugin source expects v3 → added tsconfig `paths` pin `"zod": ["./node_modules/zod"]`
+- 34 unit tests green, `bun x tsc --noEmit` clean
+
+Remaining: none for v1; fix is live only after tag/release consumed by `github:RohanAwhad/opencode-background-shell`
