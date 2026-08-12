@@ -21,7 +21,7 @@ const {
   askBashPermission,
   askExternalDirectoryPermission,
   waitSyncOrPromote,
-  setLogFilePath,
+  setLogClient,
 } = (plugin as unknown as { testInternals: TestInternals }).testInternals
 
 function tempDir() {
@@ -506,16 +506,39 @@ describe("waitSyncOrPromote", () => {
 })
 
 describe("log contract", () => {
-  test("spawn/exit events greppable in log file", async () => {
+  test("spawn/exit events greppable via client.log", async () => {
     const dir = tempDir()
-    const logPath = path.join(dir, "plugin.log")
-    setLogFilePath(logPath)
+    const entries: Array<{ level: string; service: string; message: string; extra: Record<string, unknown> }> = []
+    const mockClient = {
+      app: {
+        log: async (options: {
+          body: {
+            service: string
+            level: "debug" | "info" | "error"
+            message: string
+            extra?: Record<string, unknown>
+          }
+        }) => {
+          entries.push({
+            level: options.body.level,
+            service: options.body.service,
+            message: options.body.message,
+            extra: options.body.extra ?? {},
+          })
+        },
+      },
+    }
+    setLogClient(mockClient)
     const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
     const job = await manager.spawn({ command: "echo x", workdir: dir, label: "x", owner: "s1" }, () => Promise.resolve(), () => {})
     await waitFor(() => job.state === "exited")
-    const content = fs.readFileSync(logPath, "utf8")
-    expect(content).toContain(`[bg-bash]`)
-    expect(content).toContain(`job=${job.id} event=spawn`)
-    expect(content).toContain(`job=${job.id} event=exit`)
+    const spawnEntry = entries.find((e) => e.message.includes(`job=${job.id} event=spawn`))
+    const exitEntry = entries.find((e) => e.message.includes(`job=${job.id} event=exit`))
+    expect(spawnEntry).toBeDefined()
+    expect(exitEntry).toBeDefined()
+    expect(spawnEntry?.extra.job).toBe(job.id)
+    expect(spawnEntry?.extra.event).toBe("spawn")
+    expect(spawnEntry?.service).toBe("background-bash")
+    setLogClient(null)
   })
 })

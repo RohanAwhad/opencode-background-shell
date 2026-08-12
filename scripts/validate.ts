@@ -119,7 +119,7 @@ async function startServer(projectDir: string, scratch: string, port: number): P
     XDG_CACHE_HOME: path.join(scratch, "cache"),
     XDG_DATA_HOME: path.join(scratch, "data"),
   }
-  const proc = Bun.spawn(["opencode", "serve", "--port", String(port), "--log-level", "ERROR"], {
+  const proc = Bun.spawn(["opencode", "serve", "--port", String(port), "--log-level", "DEBUG"], {
     cwd: projectDir,
     env,
     stdout: "ignore",
@@ -265,13 +265,13 @@ const scenarios: Scenario[] = [
         ],
       ],
     },
-    prompt: "Run 'sleep 12 && echo VALTAG_2' with background_bash with run_in_background=false. Report what the tool returned.",
+    prompt: "Run 'sleep 30 && echo VALTAG_2' with background_bash with run_in_background=false. Report what the tool returned. IMPORTANT: Do NOT call background_kill — the command sleeps for 30 seconds and finishes on its own; you will be notified when it completes.",
     expect: (e) => {
       const claims: string[] = []
       const promote = grepLines(e.pluginLog, /event=promote/)
       if (promote.length > 0) claims.push(`PASS: auto-promotion logged (${e.pluginLog}:${promote[0].line})`)
       else claims.push("FAIL: no event=promote")
-      const alive = grepLines(e.pgrepFile, /VALTAG_2/)
+      const alive = grepLines(e.pgrepFile, /sh -c sleep/)
       if (alive.length > 0) claims.push(`PASS: process alive mid-job (pgrep snapshot)`)
       else claims.push("FAIL: process not alive mid-job")
       const exit = grepLines(e.pluginLog, /event=exit exitCode=0/)
@@ -537,13 +537,22 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
 
   writeScenarioConfig(projectDir, scratch, scenario)
   fs.copyFileSync(path.join(projectDir, "opencode.json"), path.join(dir, "S" + scenario.id + ".opencode.json"))
-  const projectLog = path.join(projectDir, "logs/background-bash.log")
+  const projectLog = path.join(scratch, "data", "opencode", "log", "opencode.log")
   fs.rmSync(projectLog, { force: true })
   log(`S${scenario.id}: starting server (${scenario.name})`)
   const server = await startServer(projectDir, scratch, port)
 
   log(`S${scenario.id}: running prompt`)
+  let pgrepPromise: Promise<void> | null = null
+  if (scenario.id === "S3") {
+    pgrepPromise = (async () => {
+      await waitFor(() => grepLines(projectLog, /event=promote/).length > 0, 30_000, 500)
+      await Bun.sleep(4000)
+      fs.writeFileSync(pgrepFile, alivePids("VALTAG").join("\n"))
+    })()
+  }
   const { timedOut } = await runPrompt(projectDir, scratch, port, scenario.prompt, sessionLog, RUN_TIMEOUT_MS)
+  if (pgrepPromise) await pgrepPromise
 
   if (scenario.id === "S8") {
     log("S8: deleting session via API")
@@ -562,15 +571,10 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
     await Bun.sleep(1500)
   }
 
-  if (scenario.id === "S3") {
-    await waitFor(() => grepLines(projectLog, /event=promote/).length > 0, 20_000, 500)
-    await Bun.sleep(4000)
-    fs.writeFileSync(pgrepFile, alivePids("VALTAG").join("\n"))
-  }
   if (scenario.id === "S2" || scenario.id === "S3" || scenario.id === "S9") {
     await waitFor(
       () => grepLines(projectLog, /event=notify kind=terminal/).length > 0,
-      scenario.id === "S9" ? 45_000 : 20_000,
+      scenario.id === "S3" || scenario.id === "S9" ? 45_000 : 20_000,
       500,
     )
   }
@@ -594,7 +598,11 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
     }
   }
 
-  fs.copyFileSync(projectLog, pluginLog)
+  const pluginLines = fs
+    .readFileSync(projectLog, "utf8")
+    .split("\n")
+    .filter((l) => l.includes("[bg-bash]"))
+  fs.writeFileSync(pluginLog, pluginLines.join("\n"))
   if (scenario.id !== "S3") {
     fs.writeFileSync(pgrepFile, alivePids("VALTAG|sleep 60|sleep 90|Continue\\?").join("\n"))
   }

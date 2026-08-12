@@ -33,6 +33,16 @@ declare module "@opencode-ai/sdk" {
       }): Promise<unknown>
       get(options: { path: { id: string } }): Promise<{ data?: SessionInfo }>
     }
+    app: {
+      log(options: {
+        body: {
+          service: string
+          level: "debug" | "info" | "error" | "warn"
+          message: string
+          extra?: Record<string, unknown>
+        }
+      }): Promise<unknown>
+    }
   }
   export function createOpencodeClient(options: Record<string, unknown>): CreateOpencodeClient
 }

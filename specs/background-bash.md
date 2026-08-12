@@ -426,7 +426,7 @@ The validation is designed to be executed end-to-end by another agent (a second 
 - **No interactive permission prompts**: permission paths are exercised via `permission` config fixtures (allow/deny rules), never by answering prompts. A headless run cannot answer prompts, so any scenario that hits an unconfigured prompt is a test bug, not a test case.
 - **Isolation**: scratch project under a temp dir; `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` pointed at temp dirs so the user's real global config/plugins never leak in; provider auth preserved by copying `auth.json` into the isolated config home. Nothing in the user's real config is touched.
 - **Evidence-based verdicts (mandatory)**: every PASS/FAIL claim cites an exact artifact — plugin debug log file + line number, session stdout, job log, or `pgrep` result. Uncited assertions are not accepted (project rule).
-- **Observability contract**: the plugin MUST emit stable machine-greppable debug lines for every event the validation asserts on: `[bg-bash] <ISO8601> job=<id> event=<spawn|exit|notify|stall|kill|cleanup|block|permit|deny> <key=value>...` written to a file sink under `logs/` (level controlled by `LOGGING_LEVEL`). The validation greps these lines; no other evidence is used for plugin-internal claims.
+- **Observability contract**: the plugin MUST emit stable machine-greppable debug lines for every event the validation asserts on: `[bg-bash] <ISO8601> job=<id> event=<spawn|exit|notify|stall|kill|cleanup|block|permit|deny> <key=value>...` sent via the opencode server log API (`client.app.log`, `service: "background-bash"`, level `debug|info|error`, the greppable line as `message`, fields as `extra`). Entries land in opencode's own file sink (`<XDG_DATA_HOME>/log/opencode.log`, single-line `key=value` format); the level gate is the server's `OPENCODE_LOG_LEVEL` env var (default INFO, so the harness MUST run with `OPENCODE_LOG_LEVEL=DEBUG` to capture the full event trace). The validation greps these lines (from the isolated env's log file); no other evidence is used for plugin-internal claims.
 
 ### 18.2 Environment bootstrap (agent-executed)
 
@@ -434,6 +434,7 @@ The validation is designed to be executed end-to-end by another agent (a second 
 # Prerequisites: bun, opencode CLI installed; provider auth exists on this machine
 SCRATCH=$(mktemp -d /tmp/bgval-XXXX)
 export XDG_CONFIG_HOME=$SCRATCH/config  XDG_CACHE_HOME=$SCRATCH/cache  XDG_DATA_HOME=$SCRATCH/data
+export OPENCODE_LOG_LEVEL=DEBUG   # server log level — plugin event lines are filtered by this (§18.1)
 mkdir -p "$XDG_CONFIG_HOME/opencode" "$SCRATCH/project"
 cp ~/.local/share/opencode/auth.json "$XDG_CONFIG_HOME/opencode/auth.json"   # keep provider access, drop global config (auth may also live at ~/.config/opencode/auth.json)
 # project opencode.json declares the plugin as a config tuple so options can be passed:
@@ -474,7 +475,7 @@ Sequencing note: S1 must run first (proves routing), S10 near the end (proves es
 
 ### 18.5 Evidence artifacts
 
-`logs/validate/` contains, per scenario: `S<N>.session.log` (opencode run stdout), `S<N>.plugin.log` (snapshot of plugin file-sink), `S<N>.pgrep.txt` (process sweeps with timestamps), `S<N>.jobs/` (job log files), plus `VALIDATION-REPORT.md`. The report lists, per scenario: PASS/FAIL, the exact evidence lines cited (file + line), and for FAILs the observed-vs-expected delta.
+`logs/validate/` contains, per scenario: `S<N>.session.log` (opencode run stdout), `S<N>.plugin.log` (snapshot of the plugin's `[bg-bash]` event lines, grep-filtered from `$SCRATCH/data/opencode/log/opencode.log` — the client.log sink, §18.1), `S<N>.pgrep.txt` (process sweeps with timestamps), `S<N>.jobs/` (job log files), plus `VALIDATION-REPORT.md`. The report lists, per scenario: PASS/FAIL, the exact evidence lines cited (file + line), and for FAILs the observed-vs-expected delta.
 
 ### 18.6 Teardown (agent-executed)
 

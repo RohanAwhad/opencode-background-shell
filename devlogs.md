@@ -110,3 +110,39 @@ Remaining: refresh global install cache post-push; (optional) S6/S11 agentic run
 - **S12 agentic run: PASS** (`logs/validate/VALIDATION-REPORT.md`, evidence `logs/validate/S12/`): plugin log line 3 `event=spawn ... command=echo VALTAG_12 done` → line 4 `event=exit exitCode=0`; session log line 8 shows the model's inline tool result (`VALTAG_12 done`); **zero** `event=notify` lines in the plugin log — no redundant wake. spawn→exit with no notify is the regression proof; the promote-path guard rail is S3 (unchanged, still asserts terminal notify after promotion).
 
 Remaining: (optional) full S1-S11 re-run on this machine; cache refresh post-push
+
+## 2026-08-12 — Fix: plugin debug logs via `client.log` (opencode server log) instead of cwd `logs/` file sink (0.1.5)
+
+- **Problem**: debug log went to `process.cwd()/logs/background-bash.log` (user-AGENTS.md convention) — wrong for a plugin: breaks on non-writable cwd, leaks into every project, and diverges from every other opencode plugin (kdco writes `~/.local/share/opencode/delegations/<projectId>/` + uses `client.log` → opencode's own log).
+- **Fix**: `log()` now calls `client.app.log({ body: { service: "background-bash", level, message: <[bg-bash] line>, extra: fields } })` — lands in opencode's file sink (`<XDG_DATA_HOME>/log/opencode.log`, single-line greppable `key=value` format; verified route `control.ts:62-71`, handler `handlers/control.ts:28-45`). Dropped `LOGGING_LEVEL` gate + custom sink: level filtering is the server's own `OPENCODE_LOG_LEVEL` (default INFO — our local gate was redundant and could never loosen it). Fallback: none (client always present; `.catch(() => {})` per kdco).
+- `types/vendor.d.ts`: added `app.log` to the vendored `CreateOpencodeClient` shape (that's why tsc first rejected `input.client as LogClient`).
+- Unit test rework: "log contract" now injects a mock `setLogClient`, asserts spawn/exit entries greppable in `message` + `service: "background-bash"` + fields in `extra`. 40 tests green, tsc clean.
+- Harness: `startServer` `--log-level ERROR` → `DEBUG` (critical: server gate would drop our info lines); plugin log snapshot source `projectDir/logs/background-bash.log` → `$SCRATCH/data/opencode/log/opencode.log`, grep-filtered to `[bg-bash]` lines for `S<N>.plugin.log`.
+- Docs: spec §18.1 (observability contract rewritten: client.log, OPENCODE_LOG_LEVEL), §18.2 (env export), §18.5 (snapshot source). `logs/validate/` artifacts unchanged.
+
+Remaining: re-run S1-S12 agentic validation (harness log-source change); cache refresh post-push
+
+## 2026-08-12 — Harness: S3 pgrep snapshot timing fix (validation run 2)
+
+- **First full agentic run (client.log change)**: 11/12 PASS — S3 FAIL "process not alive mid-job" (pgrep snapshot empty). Timeline evidence (SS3.plugin.log): spawn 17:02:40.430, promote 17:02:42.431, exit 17:02:52.465 — plugin behaved perfectly; snapshot was taken **after** the model turn, but gpt-4o-mini polled (`background_read` ×5) until the 12s job exited, so the snapshot landed post-exit.
+- **Root cause — harness design, not plugin**: `runScenario` takes the S3 pgrep snapshot after `runPrompt` returns (model turn ends → then snapshot). A model that polls until exit makes "alive mid-job" unprovable. Spec §18.4 says `sleep 30`; the fixture had drifted to `sleep 12`, shrinking the window further.
+- **Fix 1 (aliveness)**: S3 pgrep snapshot moved into a **concurrent watcher** started before `runPrompt` — waits for `event=promote` in the plugin log, +4s, snapshots `pgrep -fl VALTAG` mid-job. Fixture `sleep 12` → `sleep 30` (spec alignment).
+- **Fix 2 (exit/notify)**: with the model turn ending early (~9s) the post-turn terminal-notify wait (20s) missed the 30s job's exit; S3's wait bumped to 45s (same as S9). Verify-both-ways: model polling until exit (slow turn) or stopping early (fast turn) both now produce complete evidence.
+- **S3 reruns**: 1st retry FAIL (pre-fix), 2nd FAIL (fix 1 landed — alive PASS, exit/notify missed → fix 2), 3rd **PASS** 4/4: promote (`SS3.plugin.log:4`), alive mid-job (pgrep `64688 sh -c sleep 30 && echo VALTAG_2`), exit 0 (`:7`), terminal notify (`:8`).
+- Full-suite rerun in progress (single coherent report); S9 remains SKIP-with-reason (no `limits.context` in local models catalog → auto-compaction unreachable headless).
+
+Remaining: final full-run verdict + devlog citation; cache refresh post-push
+
+## 2026-08-12 — Validation verdict: FULL PASS (client.log observability switch, 0.1.5)
+
+- **Final full-suite run 2026-08-12 17:18 UTC (`logs/validate/VALIDATION-REPORT.md`)**: **12/12 scenarios PASS, 0 FAIL** — S1 (block, plugin.log:2 + session.log:5), S2 (spawn/exit/notify chain, bg_56cae0b7.log), S3 (promote :4, alive mid-job `sh -c sleep 30`, exit :7, terminal notify :8), S4 (permit via=allow), S12 (inline output, zero notify), S5 (deny, no spawn), S6 (stall once, process survives), S7 (kill → cancelled, no terminal notify, group dead), S8 (session.deleted cleanup), S9 (SKIP-with-reason: no `limits.context` in local models catalog → auto-compaction unreachable; covered by unit tests), S10 (kill-switch, bash executes), S11 (devnull stdin, nested opencode run completes, exit 0). 49 PASS lines, 0 FAIL.
+- **S3 was the only flaky scenario across 6 runs — 3 distinct model-behavior failure modes, all harness-side, never plugin-side** (plugin events were correct in every run):
+  1. Model polled `background_read` until the 12s job exited → post-turn pgrep snapshot landed post-exit (harness design flaw)
+  2. Model hallucinated completion and ended turn early → 20s terminal-notify wait < 30s job
+  3. Model decided the job was "hanging" and called `background_kill` itself (twice) → exit/notify never observed
+- **Harness fixes**: (1) S3 pgrep snapshot moved to a concurrent watcher started before `runPrompt` (promote +4s → snapshot) so aliveness is proven mid-job regardless of turn length; fixture `sleep 12` → `sleep 30` (spec §18.4 alignment); (2) S3 terminal-notify wait 20s → 45s (both slow-turn and fast-turn models now produce complete evidence); (3) S3 prompt forbids `background_kill`; (4) aliveness assertion greps `/sh -c sleep/` not `/VALTAG_2/` (the `opencode run` CLI client's cmdline contains the prompt text with VALTAG_2 — was satisfying the claim spuriously).
+- **client.log observability verified live**: every `[bg-bash]` line in `S<N>.plugin.log` came from the isolated server's `opencode.log` (grep-filtered at snapshot time, `validate.ts:597`); `--log-level DEBUG` on the serve side is required (proven: run 1 with ERROR-level filter would have dropped everything). Greppable single-line format preserved through the server's own formatter.
+- Unit tests: 40/40 green; `tsc --noEmit` clean.
+- Teardown per §18.6: no VALTAG stragglers; scratch dirs removed.
+
+Remaining: cache refresh post-push (`rm -rf ~/.cache/opencode/packages/github:RohanAwhad`); tag 0.1.5

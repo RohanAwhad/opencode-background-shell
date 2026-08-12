@@ -2,7 +2,7 @@ import { tool, type Plugin, type Hooks, type ToolContext } from "@opencode-ai/pl
 import { z } from "zod"
 import os from "node:os"
 import path from "node:path"
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { mkdirSync, readFileSync, statSync } from "node:fs"
 
 const PLUGIN_ID = "opencode-background-shell"
 const LOG_PREFIX = "[bg-bash]"
@@ -87,28 +87,44 @@ export type Job = {
   _watchdog: ReturnType<typeof setInterval> | null
 }
 
-let logFilePath = ""
+type LogClient = {
+  app: {
+    log(options: {
+      body: {
+        service: string
+        level: "debug" | "info" | "error"
+        message: string
+        extra?: Record<string, unknown>
+      }
+    }): Promise<unknown>
+  }
+}
 
-function setLogFilePath(p: string) {
-  logFilePath = p
-  mkdirSync(path.dirname(p), { recursive: true })
+let logClient: LogClient | null = null
+
+function setLogClient(client: LogClient | null) {
+  logClient = client
 }
 
 function log(
   level: "debug" | "info" | "error",
   fields: Record<string, string | number | boolean | null | undefined>,
 ) {
-  const envLevel = (process.env.LOGGING_LEVEL ?? "info").toLowerCase()
-  const order = { debug: 0, info: 1, error: 2 } as const
-  if (order[level] < order[envLevel as keyof typeof order]) return
   const line = `${LOG_PREFIX} ${new Date().toISOString()} ${Object.entries(fields)
+    .filter(([, v]) => v !== undefined && v !== null)
     .map(([k, v]) => `${k}=${v}`)
     .join(" ")}`
-  if (logFilePath) {
-    try {
-      appendFileSync(logFilePath, line + "\n")
-    } catch {}
-  }
+  if (!logClient) return
+  logClient.app
+    .log({
+      body: {
+        service: "background-bash",
+        level,
+        message: line,
+        extra: { ...fields },
+      },
+    })
+    .catch(() => {})
 }
 
 function generateJobId(): string {
@@ -638,9 +654,7 @@ async function waitSyncOrPromote(
 
 
 const BackgroundShellPlugin: Plugin = async (input, options) => {
-  if (!logFilePath) {
-    setLogFilePath(path.join(process.cwd(), "logs", "background-bash.log"))
-  }
+  setLogClient(input.client as LogClient)
   const initialOptions = (options ?? {}) as Record<string, unknown>
   const manager = new JobManager(resolveConfig(initialOptions["background_bash"] ?? initialOptions))
 
@@ -910,7 +924,7 @@ export type TestInternals = {
   askBashPermission: typeof askBashPermission
   askExternalDirectoryPermission: typeof askExternalDirectoryPermission
   waitSyncOrPromote: typeof waitSyncOrPromote
-  setLogFilePath: typeof setLogFilePath
+  setLogClient: typeof setLogClient
   log: typeof log
   PROMPT_PATTERNS: typeof PROMPT_PATTERNS
   FILE_OPS: typeof FILE_OPS
@@ -935,7 +949,7 @@ export default Object.assign(BackgroundShellPlugin, {
     askBashPermission,
     askExternalDirectoryPermission,
     waitSyncOrPromote,
-    setLogFilePath,
+    setLogClient,
     log,
     PROMPT_PATTERNS,
     FILE_OPS,
