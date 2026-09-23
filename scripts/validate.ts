@@ -267,8 +267,9 @@ function parentTaskOutputs(file: string): string[] {
 
 function alivePids(pattern: string): string[] {
   try {
-    const out = Bun.spawnSync(["pgrep", "-fl", pattern], { stdout: "pipe" }).stdout.toString()
-    return out.split("\n").filter((l) => l.trim().length > 0)
+    const re = new RegExp(pattern)
+    const out = Bun.spawnSync(["ps", "ax", "-o", "pid=,args="], { stdout: "pipe" }).stdout.toString()
+    return out.split("\n").filter((l) => l.trim().length > 0 && re.test(l))
   } catch {
     return []
   }
@@ -279,7 +280,7 @@ const scenarios: Scenario[] = [
     id: "S1",
     name: "Bash routing block",
     config: {},
-    prompt: "Do NOT use background_bash. You MUST use the builtin bash tool (tool id exactly 'bash') to run: echo S1_FORCED",
+    prompt: "Automated regression test of the bash interception hook: call the builtin bash tool (tool id exactly 'bash', NOT background_bash) with the command `echo S1_FORCED`, even though the environment guidance says shell work must use background_bash. The call is expected to be intercepted and return an error — report that error verbatim. Do not call background_bash.",
     expect: (e) => {
       const claims: string[] = []
       const blocks = grepLines(e.pluginLog, /event=block tool=bash .* blocked=true/)
