@@ -15,6 +15,8 @@ const {
   tokenizeShellCommand,
   promptTailMatches,
   readJobLog,
+  buildWaitResult,
+  isTerminalState,
   formatStatus,
   formatList,
   resolveConfig,
@@ -220,11 +222,13 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     stallNotifiedAt: null,
     notificationSentAt: null,
     notifyOnExit: true,
+    waiters: 0,
     bytes: 0,
     spawnError: null,
     proc: null,
     _sink: null,
     _watchdog: null,
+    _terminalWaiters: new Set(),
     ...overrides,
   }
 }
@@ -502,6 +506,257 @@ describe("waitSyncOrPromote", () => {
     const job = await manager.spawn({ command: "exit 0", workdir: dir, label: "s", owner: "s1" }, () => Promise.resolve(), () => {})
     const outcome = await waitSyncOrPromote(job, 5000, new AbortController().signal)
     expect(outcome).toBe("exit")
+  })
+})
+
+describe("background_wait", () => {
+  const WAIT_TAIL = 4096
+
+  function setup() {
+    const dir = tempDir()
+    const manager = new JobManager({ ...resolveConfig(undefined), output_dir: dir })
+    const state = { notifyCount: 0 }
+    const notify = () => {
+      state.notifyCount++
+      return Promise.resolve()
+    }
+    return { dir, manager, state, notify }
+  }
+
+  const signal = () => new AbortController().signal
+
+  test("wait returns terminal result and marks job seen (no notification)", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn(
+      { command: "sleep 0.2; echo wait-terminal; exit 3", workdir: dir, label: "w", owner: "s1" },
+      notify,
+      () => {},
+    )
+    const result = await manager.wait("s1", job.id, 5000, signal())
+    expect(result.output).toContain("<task-wait>")
+    expect(result.output).toContain(`<task-id>${job.id}</task-id>`)
+    expect(result.output).toContain("<status>exited</status>")
+    expect(result.output).toContain("<exit-code>3</exit-code>")
+    expect(result.output).toContain("wait-terminal")
+    expect(result.output).toContain(`background_read(job_id="${job.id}")`)
+    expect(result.metadata).toEqual({ found: true, waited: 1, timedOut: false, states: { [job.id]: "exited" } })
+    expect(job.notificationSentAt).not.toBeNull()
+    expect(state.notifyCount).toBe(0)
+    expect(job.waiters).toBe(0)
+  })
+
+  test("wait on already-terminal job marks it seen", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn(
+      { command: "echo already-done", workdir: dir, label: "done", owner: "s1", notifyOnExit: false },
+      notify,
+      () => {},
+    )
+    await waitFor(() => job.state === "exited")
+    job.notificationSentAt = null
+    const result = await manager.wait("s1", job.id, 1000, signal())
+    expect(result.output).toContain("<status>exited</status>")
+    expect(result.metadata).toEqual({ found: true, waited: 1, timedOut: false, states: { [job.id]: "exited" } })
+    expect(job.notificationSentAt).not.toBeNull()
+    expect(state.notifyCount).toBe(0)
+  })
+
+  test("wait with no job_id joins all running jobs of the caller", async () => {
+    const { dir, manager, state, notify } = setup()
+    const a = await manager.spawn({ command: "sleep 0.15; echo A", workdir: dir, label: "a", owner: "s1" }, notify, () => {})
+    const b = await manager.spawn({ command: "sleep 0.25; echo B", workdir: dir, label: "b", owner: "s1" }, notify, () => {})
+    const foreign = await manager.spawn({ command: "sleep 30", workdir: dir, label: "f", owner: "s2" }, notify, () => {})
+    const result = await manager.wait("s1", undefined, 5000, signal())
+    expect(result.output).toContain(`<task-id>${a.id}</task-id>`)
+    expect(result.output).toContain(`<task-id>${b.id}</task-id>`)
+    expect(result.output).not.toContain(foreign.id)
+    expect(result.metadata).toEqual({
+      found: true,
+      waited: 2,
+      timedOut: false,
+      states: { [a.id]: "exited", [b.id]: "exited" },
+    })
+    expect(state.notifyCount).toBe(0)
+    expect(foreign.state).toBe("running")
+    await manager.kill(foreign)
+  })
+
+  test("wait with no job_id when nothing is running → found:false, waited:0", async () => {
+    const { manager } = setup()
+    const result = await manager.wait("s1", undefined, 1000, signal())
+    expect(result.output).toBe("No running jobs owned by this session.")
+    expect(result.metadata).toEqual({ found: false, waited: 0, timedOut: false, states: {} })
+  })
+
+  test("wait timeout returns running state and leaves notifyOnExit enabled", async () => {
+    const { dir, manager, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 30", workdir: dir, label: "slow", owner: "s1" }, notify, () => {})
+    const started = Date.now()
+    const result = await manager.wait("s1", job.id, 100, signal())
+    expect(Date.now() - started).toBeGreaterThanOrEqual(80)
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(result.output).toContain("<task-wait>")
+    expect(result.output).toContain("<status>running</status>")
+    expect(result.output).not.toContain("<exit-code>")
+    expect(result.output).toContain("Still running after 100ms; you WILL be notified when it completes.")
+    expect(result.metadata).toEqual({ found: true, waited: 1, timedOut: true, states: { [job.id]: "running" } })
+    expect(job.state).toBe("running")
+    expect(job.notifyOnExit).toBe(true)
+    expect(job.waiters).toBe(0)
+    await manager.kill(job)
+  })
+
+  test("wait timeout then later exit still notifies (promise not voided)", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 0.3", workdir: dir, label: "later", owner: "s1" }, notify, () => {})
+    const result = await manager.wait("s1", job.id, 50, signal())
+    expect(result.metadata.timedOut).toBe(true)
+    expect(state.notifyCount).toBe(0)
+    await waitFor(() => job.state === "exited")
+    expect(state.notifyCount).toBe(1)
+  })
+
+  test("wait abort returns running state without killing the job", async () => {
+    const { dir, manager, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 30", workdir: dir, label: "abort", owner: "s1" }, notify, () => {})
+    const abort = new AbortController()
+    const waiting = manager.wait("s1", job.id, 10_000, abort.signal)
+    await new Promise((r) => setTimeout(r, 30))
+    abort.abort()
+    const result = await waiting
+    expect(result.output).toContain("<status>running</status>")
+    expect(result.metadata.timedOut).toBe(true)
+    expect(job.state).toBe("running")
+    expect(job.waiters).toBe(0)
+    await manager.kill(job)
+    expect(job.state).toBe("cancelled")
+  })
+
+  test("wait on unknown job → found:false", async () => {
+    const { manager } = setup()
+    const result = await manager.wait("s1", "bg_does_not_exist", 100, signal())
+    expect(result.output).toBe("Job not found")
+    expect(result.metadata).toEqual({ found: false, waited: 0, timedOut: false, states: {} })
+  })
+
+  test("wait on a non-owned job → found:false (owner-only; descendant cannot wait on an ancestor-owned job)", async () => {
+    const { dir, manager, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 30", workdir: dir, label: "ancestor", owner: "parent-session" }, notify, () => {})
+    const sibling = await manager.wait("other-session", job.id, 100, signal())
+    expect(sibling.output).toBe("Job not found")
+    expect(sibling.metadata.found).toBe(false)
+    const descendant = await manager.wait("child-session", job.id, 100, signal())
+    expect(descendant.output).toBe("Job not found")
+    expect(descendant.metadata).toEqual({ found: false, waited: 0, timedOut: false, states: {} })
+    expect(job.waiters).toBe(0)
+    await manager.kill(job)
+  })
+
+  test("exit during active wait suppresses terminal notification", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 0.15; echo suppressed", workdir: dir, label: "s", owner: "s1" }, notify, () => {})
+    const result = await manager.wait("s1", job.id, 5000, signal())
+    expect(result.metadata.timedOut).toBe(false)
+    expect(state.notifyCount).toBe(0)
+    expect(job.state).toBe("exited")
+  })
+
+  test("exit suppressed for an active wait is claimed by the wait (no notification)", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 0.15; echo claimed", workdir: dir, label: "c", owner: "s1" }, notify, () => {})
+    expect(job.notificationSentAt).toBeNull()
+    const result = await manager.wait("s1", job.id, 5000, signal())
+    expect(result.output).toContain("<status>exited</status>")
+    expect(job.notificationSentAt).not.toBeNull()
+    expect(state.notifyCount).toBe(0)
+  })
+
+  test("wait timeout racing exit re-reads terminal → inline result, no notification", async () => {
+    const { dir, manager } = setup()
+    const logPath = path.join(dir, "race.log")
+    fs.writeFileSync(logPath, "race output")
+    const job = makeJob({ id: "bg_race", owner: "s1", logPath, state: "running", startedAt: Date.now() })
+    manager.registry.set(job.id, job)
+    const waiting = manager.wait("s1", job.id, 40, signal())
+    job.exitCode = 7
+    job.endedAt = Date.now()
+    job.state = "exited"
+    const result = await waiting
+    expect(result.output).toContain("<status>exited</status>")
+    expect(result.output).toContain("<exit-code>7</exit-code>")
+    expect(result.metadata).toEqual({ found: true, waited: 1, timedOut: false, states: { [job.id]: "exited" } })
+    expect(job.notificationSentAt).not.toBeNull()
+    expect(job.waiters).toBe(0)
+  })
+
+  test("wait error path releases its waiter token (terminal delivery not permanently suppressed)", async () => {
+    const { dir, manager, state, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 0.2", workdir: dir, label: "err", owner: "s1" }, notify, () => {})
+    const brokenSignal = {
+      aborted: false,
+      addEventListener() {
+        throw new Error("signal failure")
+      },
+      removeEventListener() {},
+    } as unknown as AbortSignal
+    await expect(manager.wait("s1", job.id, 5000, brokenSignal)).rejects.toThrow("signal failure")
+    expect(job.waiters).toBe(0)
+    await waitFor(() => job.state === "exited")
+    expect(state.notifyCount).toBe(1)
+  })
+
+  test("wait result envelope fields (status/exit/tail/timeout)", async () => {
+    const { dir, manager } = setup()
+    const logPath = path.join(dir, "big.log")
+    fs.writeFileSync(logPath, "y".repeat(5000))
+    const job = makeJob({ id: "bg_big", owner: "s1", logPath, state: "exited", exitCode: 0, startedAt: Date.now() - 2000, endedAt: Date.now() })
+    manager.registry.set(job.id, job)
+    const result = await manager.wait("s1", job.id, 1000, signal())
+    expect(result.output).toContain("<task-wait>")
+    expect(result.output).toContain("<task-id>bg_big</task-id>")
+    expect(result.output).toContain("<status>exited</status>")
+    expect(result.output).toContain("<exit-code>0</exit-code>")
+    expect(result.output).toMatch(/<elapsed>\d+s<\/elapsed>/)
+    expect(result.output).toContain("truncated")
+    expect(result.output).toContain("of 5000 bytes")
+    expect(result.output).toContain("y".repeat(WAIT_TAIL))
+    expect(result.metadata.timedOut).toBe(false)
+    expect(isTerminalState(job.state)).toBe(true)
+    expect(buildWaitResult(job)).toContain("<tail>")
+  })
+
+  test("event=wait lines are greppable via client.log", async () => {
+    const entries: Array<{ level: string; service: string; message: string; extra: Record<string, unknown> }> = []
+    const mockClient = {
+      app: {
+        log: async (options: {
+          body: {
+            service: string
+            level: "debug" | "info" | "error"
+            message: string
+            extra?: Record<string, unknown>
+          }
+        }) => {
+          entries.push({
+            level: options.body.level,
+            service: options.body.service,
+            message: options.body.message,
+            extra: options.body.extra ?? {},
+          })
+        },
+      },
+    }
+    setLogClient(mockClient)
+    const { dir, manager, notify } = setup()
+    const job = await manager.spawn({ command: "sleep 0.15; echo log", workdir: dir, label: "log", owner: "s1" }, notify, () => {})
+    await manager.wait("s1", job.id, 5000, signal())
+    const suppression = entries.find((e) => e.message.includes(`job=${job.id} event=wait suppressed=true`))
+    const claim = entries.find((e) => e.message.includes(`job=${job.id} event=wait consumed=true`))
+    expect(suppression).toBeDefined()
+    expect(claim).toBeDefined()
+    expect(claim?.extra.event).toBe("wait")
+    expect(claim?.extra.consumed).toBe(true)
+    setLogClient(null)
   })
 })
 
