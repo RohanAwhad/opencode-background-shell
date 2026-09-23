@@ -1,0 +1,84 @@
+schema_version: "0.1"
+
+project:
+  id: opencode_background_shell
+  root: /home/rohan/1_Projects/opencode-background-shell
+
+snapshot:
+  source_session: ses_f30999c64ffe1taejs2ndRwMO8
+  captured_through: msg_0cf74a484001EStp7LzmNfjsP2
+  semantics: current_state_at_capture
+  superseded_entries: omitted
+  historical_source: git
+
+evidence:
+  H1:
+    actor: human
+    type: direct_instruction
+    source_ref: msg_0cf71653f0014Ir4JWHW3mTo7H
+    quote: |
+      but do you understand my intent? i want to be able to run background bash in subagents.
+
+human_approved:
+  intents:
+    - id: INT-001
+      scope: project
+      lifecycle: active
+      statement: >
+        Be able to run background_bash in subagents.
+      evidence: [H1]
+
+agent_context:
+  research:
+    - id: RES-001
+      intent_ids: [INT-001]
+      statement: >
+        The task tool resolves when the subagent's turn ends and returns the
+        subagent's last assistant text; a subagent that launches a background
+        job and ends its turn hands the parent an interim "job started" result
+        (packages/opencode/src/tool/task.ts:128-153).
+      basis: code_inspection
+      source_ref: msg_0cf682d14001RU9TWVKtbKAjRg
+
+    - id: RES-002
+      intent_ids: [INT-001]
+      statement: >
+        On job exit the plugin wakes the subagent session via promptAsync with
+        noReply=false; the subagent's follow-up work and final response stay in
+        the child session because the parent's task call already returned, so
+        the result is orphaned.
+      basis: code_path_analysis
+      source_ref: msg_0cf682d14001RU9TWVKtbKAjRg
+
+    - id: RES-003
+      intent_ids: [INT-001]
+      statement: >
+        Only the idle-child case breaks: a notification delivered while the
+        subagent's run loop is active is folded into that turn, and the task
+        result is correct; the orphan occurs when the child's turn has already
+        ended before the job does.
+      basis: code_inspection
+      source_ref: msg_0cf682d14001RU9TWVKtbKAjRg
+
+  assumptions:
+    - id: ASM-001
+      intent_ids: [INT-001]
+      statement: >
+        The intended fix preserves async background execution in subagents and
+        adds a completion path back to the parent (notification forwarding
+        and/or a background_wait join tool); the exact mechanism is undecided.
+      status: agent_derived
+      consequence: >
+        A notification-only bridge leaves the initial task result interim; if
+        the parent's task call must return the true final result, a blocking
+        join/wait mechanism is additionally required.
+
+  observations: []
+
+  unapproved_actions: []
+
+open_questions:
+  - >
+    Should the parent's task call block until the subagent is truly done
+    (background_wait join as the happy path), or is a later notification
+    carrying the subagent's final response acceptable?

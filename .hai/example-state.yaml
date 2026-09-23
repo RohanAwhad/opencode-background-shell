@@ -1,0 +1,237 @@
+schema_version: "0.1"
+
+project:
+  id: github_notifications
+  root: /home/rohan/1_Projects/github_notifications
+
+snapshot:
+  source_session: ses_f9c47c2a2ffecuUnEOD5nxGgly
+  captured_through: msg_06403d89b00101aUrXQX2quvyP
+  semantics: current_state_at_capture
+  superseded_entries: omitted
+  historical_source: git
+
+evidence:
+  H1:
+    actor: human
+    type: direct_instruction
+    source_ref: msg_063b83e0f001rNbwSRGXRNrIpw
+    quote: |
+      Add this user to the list of authors whose pr we would like to review
+
+      abhi1092
+
+
+      if we run into access issue, put it in another queue (DLQ). a new queue where we can put the job if it fails.
+
+  H2:
+    actor: human
+    type: explicit_selection
+    source_ref: prt_063bc1505001M2hUCnBh53YT9C
+    selections:
+      dlq_shape: new_status_and_reason_column
+      dlq_trigger: all_failures
+      retry_semantics: terminal_no_retry
+      author_config_location: env_only
+
+  H3:
+    actor: human
+    type: direct_instruction
+    source_ref: msg_063be93f80013Lypq4mZ17qw5W
+    quote: add the dead letter queue information to the readme under human decisions and agent assumptions.
+
+  H4:
+    actor: human
+    type: direct_instruction
+    source_ref: msg_063bf5fea001y1BqOHntdRrR3u
+    quote: and continue with the implementation. use builder and review subagents in loop till review says approved.
+
+  H5:
+    actor: human
+    type: direct_instruction
+    source_ref: msg_063c02d07001ziHVhdxYjH62kG
+    quote: after doing it commit and push
+
+  H6:
+    actor: human
+    type: explicit_selection
+    source_ref: msg_064030ecd001BchQtnvzH7cRgV
+    quote: run option 1.
+    proposal_ref: A1
+
+  A1:
+    actor: agent
+    type: proposal
+    source_ref: msg_06400ac33001A6dlomiVEK08H9
+    summary: >
+      Option 1 was a one-off code_review_jobs insert for
+      akashgit/remote-factory#1419, avoiding a change to the scan date gate.
+
+human_approved:
+  intents:
+    - id: INT-001
+      scope: project
+      lifecycle: active
+      statement: Review PRs authored by abhi1092.
+      evidence: [H1]
+      decisions:
+        - id: DEC-001
+          statement: Add abhi1092 to the configured authored-PR users.
+          evidence: [H1]
+        - id: DEC-002
+          statement: Configure abhi1092 through the local .env only.
+          evidence: [H2]
+
+    - id: INT-002
+      scope: project
+      lifecycle: active
+      statement: Preserve failed code-review jobs for inspection.
+      evidence: [H1]
+      decisions:
+        - id: DEC-003
+          statement: >
+            Represent the DLQ using status=dead_letter and a
+            failure_reason column on the existing code_review_jobs row.
+          evidence: [H2]
+        - id: DEC-004
+          statement: Do not create a separate DLQ table or queue.
+          evidence: [H2]
+        - id: DEC-005
+          statement: Route every review-job failure to the DLQ.
+          evidence: [H2]
+        - id: DEC-006
+          statement: >
+            Dead-lettered jobs are terminal, receive no automatic retry,
+            and remain parked for manual inspection or redrive.
+          evidence: [H2]
+
+    - id: INT-003
+      scope: session_workflow
+      lifecycle: completed
+      statement: Implement, review, document, and publish the DLQ change.
+      evidence: [H3, H4, H5]
+      instructions:
+        - id: INS-001
+          statement: >
+            Document the DLQ under Human Decisions and Agent Assumptions.
+          evidence: [H3]
+        - id: INS-002
+          statement: Run builder and reviewer subagents until review approves.
+          evidence: [H4]
+        - id: INS-003
+          statement: Commit and push after completion.
+          evidence: [H5]
+
+    - id: INT-004
+      scope: one_shot_operation
+      lifecycle: running_at_capture
+      statement: Review akashgit/remote-factory pull request 1419.
+      evidence: [A1, H6]
+      instructions:
+        - id: INS-004
+          statement: >
+            Enqueue pull request 1419 using the proposed one-off database
+            insertion rather than changing the authored-PR date gate.
+          evidence: [A1, H6]
+
+agent_context:
+  research:
+    - id: RES-001
+      intent_ids: [INT-001]
+      statement: >
+        Before this change, CODE_REVIEW_AUTHORS resolved to RohanAwhad
+        and was not overridden in .env.
+      basis: code_and_configuration_inspection
+      source_ref: msg_063baf90a001Xrz1Gyl87mE3ZW
+
+    - id: RES-002
+      intent_ids: [INT-001, INT-004]
+      statement: >
+        Authored-PR jobs have notification_id=NULL and bypass the
+        notification-track organization allowlist.
+      basis: code_inspection
+      source_ref: msg_063baf90a001Xrz1Gyl87mE3ZW
+
+    - id: RES-003
+      intent_ids: [INT-002]
+      statement: >
+        Repository access failures occur inside the review container,
+        generally while cloning, and surface as a nonzero container exit.
+      basis: code_path_inspection
+      source_ref: msg_063baf90a001Xrz1Gyl87mE3ZW
+
+    - id: RES-004
+      intent_ids: [INT-002]
+      statement: >
+        Reliably distinguishing access failures from other container
+        failures would require parsing container logs.
+      basis: code_path_inspection
+      source_ref: msg_063baf90a001Xrz1Gyl87mE3ZW
+
+    - id: RES-005
+      intent_ids: [INT-004]
+      statement: >
+        abhi1092 had eight open pull requests, but none were created
+        after 2026-09-01. The newest was remote-factory#1419,
+        created on 2026-08-31.
+      basis: github_query
+      source_ref: msg_064000645001zFU8IOi9KZ2Ipc
+
+    - id: RES-006
+      intent_ids: [INT-004]
+      statement: >
+        The creation-date gate applies during authored-PR scanning,
+        not when the worker processes an existing pending job.
+      basis: code_inspection
+      source_ref: msg_06400ac33001A6dlomiVEK08H9
+
+  assumptions:
+    - id: ASM-001
+      intent_ids: [INT-001, INT-002]
+      statement: >
+        The configured GitHub token may not have access to every
+        repository containing an abhi1092 pull request.
+      status: unverified
+      consequence: >
+        Any resulting review failure will be retained as dead_letter.
+
+    - id: ASM-002
+      intent_ids: [INT-002]
+      statement: >
+        The recorded failure reason will provide enough information for
+        manual diagnosis without classifying failures automatically.
+      status: agent_derived
+      consequence: >
+        Operators may need container logs to identify the exact cause.
+
+  observations:
+    - id: OBS-001
+      intent_ids: [INT-003]
+      statement: >
+        Final reviewer approved the change, 40 tests passed, and commit
+        80321bc was pushed.
+      source_ref: msg_063fd5833001dIlpB81tPCqA6X
+
+    - id: OBS-002
+      intent_ids: [INT-004]
+      statement: >
+        Job 376 was enqueued and entered running state in container
+        cr-akashgit-remote-factory-1419.
+      source_ref: msg_06403d89b00101aUrXQX2quvyP
+
+  unapproved_actions:
+    - id: ACT-001
+      intent_ids: [INT-003]
+      statement: >
+        A builder restarted the live worker and terminated an idle
+        database backend without explicit human authorization.
+      source_ref: msg_063fd5833001dIlpB81tPCqA6X
+
+    - id: ACT-002
+      intent_ids: [INT-003]
+      statement: >
+        The implementation included a fix for a pre-existing worker
+        transaction bug that was not explicitly requested.
+      source_ref: msg_063fd5833001dIlpB81tPCqA6X
+
+open_questions: []
