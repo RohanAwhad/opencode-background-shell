@@ -966,6 +966,24 @@ describe("subagent completion bridge", () => {
     expect(setup.bridge.cycles.get("child")?.resolved).toBe("captured")
   })
 
+  test("task result body with core's newline wrapper still captures (trimmed equality)", async () => {
+    const setup = makeBridge({ sessions: { child: { parentID: "parent" }, parent: {} } })
+    const job = makeJob({ id: "bg_wrap", owner: "child", state: "exited", exitCode: 0 })
+    await addAndArm(setup, job)
+    const text = "Job `bg_5d0fea27` output: **SUBTAG_15**"
+    setup.messages.set("child", [bridgeAssistant(text, Date.now() + 1000)])
+    setup.messages.set("parent", [
+      bridgeTaskPart(
+        "child",
+        "completed",
+        `<task id="child" state="completed">\n<task_result>\n${text}\n</task_result>\n</task>`,
+      ),
+    ])
+    await setup.bridge.handleIdle("child")
+    expect(setup.delivered.length).toBe(0)
+    expect(setup.bridge.cycles.get("child")?.resolved).toBe("captured")
+  })
+
   test("task part completed with different text → forward", async () => {
     const setup = makeBridge({ sessions: { child: { parentID: "parent" }, parent: {} } })
     const job = makeJob({ id: "bg_diff", owner: "child", state: "exited", exitCode: 0 })

@@ -78,7 +78,7 @@ export type WaitResult = {
   metadata: WaitMetadata
 }
 
-export function isTerminalState(state: JobState): boolean {
+function isTerminalState(state: JobState): boolean {
   return state === "exited" || state === "failed" || state === "cancelled"
 }
 
@@ -748,7 +748,7 @@ export type BridgeCause = "job" | "forwarded-child"
 export type BridgeResolved = null | "captured" | "forwarded" | "degraded"
 export type DegradedReason = "child-not-resumable" | "no-final-text" | "still-working" | "session-gone"
 
-export const BRIDGE_RESUME_GRACE_RETRIES = 3
+const BRIDGE_RESUME_GRACE_RETRIES = 3
 
 export type BridgeCycle = {
   token: number
@@ -801,11 +801,11 @@ export type ParentTaskPart = {
   resultText: string | null
 }
 
-export function formatBridgeJobLine(job: Job): string {
+function formatBridgeJobLine(job: Job): string {
   return job.exitCode !== null ? `${job.id} ${job.state} exitCode=${job.exitCode}` : `${job.id} ${job.state}`
 }
 
-export function buildSubagentCompletionEnvelope(
+function buildSubagentCompletionEnvelope(
   childID: string,
   jobLines: string[],
   finalText: string,
@@ -824,7 +824,7 @@ export function buildSubagentCompletionEnvelope(
   ].join("\n")
 }
 
-export function buildDegradedCompletionEnvelope(
+function buildDegradedCompletionEnvelope(
   childID: string,
   reason: DegradedReason,
   jobLines: string[],
@@ -841,13 +841,13 @@ export function buildDegradedCompletionEnvelope(
   ].join("\n")
 }
 
-export function parseTaskResultBody(output: string | undefined): string | null {
+function parseTaskResultBody(output: string | undefined): string | null {
   if (!output) return null
   const match = /<task_result>([\s\S]*)<\/task_result>/.exec(output)
   return match ? match[1] : null
 }
 
-export function latestCompletedAssistantText(
+function latestCompletedAssistantText(
   messages: BridgeMessage[] | null | undefined,
 ): { text: string; at: number } | null {
   if (!messages) return null
@@ -867,7 +867,7 @@ export function latestCompletedAssistantText(
   return latest
 }
 
-export function findParentTaskPart(
+function findParentTaskPart(
   messages: BridgeMessage[] | null | undefined,
   childID: string,
 ): ParentTaskPart | null {
@@ -892,7 +892,7 @@ export function findParentTaskPart(
   return found
 }
 
-export class BridgeManager {
+class BridgeManager {
   readonly cycles = new Map<string, BridgeCycle>()
   private readonly statuses = new Map<string, "idle" | "busy" | "retry">()
   private readonly deps: BridgeDeps
@@ -1096,7 +1096,7 @@ export class BridgeManager {
         task.status === "completed" &&
         task.resultText !== null &&
         childText !== null &&
-        task.resultText === childText.text &&
+        task.resultText.trim() === childText.text.trim() &&
         childText.at > cycle.wakeAt
       ) {
         this.resolveCaptured(sessionID, cycle)
