@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import fs from "node:fs"
 import plugin, { type TestInternals, type Job, type BridgeMessage } from "../.opencode/plugins/background-bash"
+import * as pluginModule from "../.opencode/plugins/background-bash"
 
 const {
   JobManager,
@@ -1401,5 +1402,11 @@ describe("bridge plugin wiring", () => {
     await w.hooks.tool.background_kill.execute({ job_id: String(spawned.metadata?.jobId) }, w.ctx("child"))
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(w.logLines.filter((line) => line.includes("event=bridge status=armed")).length).toBe(0)
+  })
+})
+
+describe("module export surface", () => {
+  test("plugin module exposes only the default export (legacy loader invariant)", () => {
+    expect(Object.keys(pluginModule).sort()).toEqual(["default"])
   })
 })
