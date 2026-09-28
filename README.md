@@ -55,12 +55,12 @@ bun x tsc --noEmit
 ### Agentic validation (no human in the loop)
 
 ```bash
-bun run scripts/validate.ts            # S1-S11 headless, evidence to logs/validate/
+bun run scripts/validate.ts            # S1-S15 headless, evidence to logs/validate/
 bun run scripts/validate.ts --scenarios S3,S6   # subset
 bun run scripts/validate.ts --keep     # keep scratch dir for inspection
 ```
 
-Requires `bun`, the `opencode` CLI, and provider auth on the machine (copied into an isolated env; model defaults to `openai/gpt-4o-mini`, override with `VALIDATE_MODEL`). Each scenario runs in a fully isolated scratch project (XDG envs) via `opencode serve` + `opencode run --attach`, and writes evidence files (session output, plugin log, pgrep snapshots, job logs) plus `logs/validate/VALIDATION-REPORT.md`. S9 (compaction carry) is SKIP-with-reason in headless mode: no model in the local models.dev catalog carries `limits.context`, so core's auto-compaction never triggers.
+Requires `bun`, the `opencode` CLI, and provider auth on the machine (copied into an isolated env; model defaults to `openai/gpt-4o-mini`, override with `VALIDATE_MODEL`). On machines where the default model is not in the isolated provider list, the harness fails with `ProviderModelNotFoundError` — set `VALIDATE_MODEL` to a model the machine's provider auth exposes (e.g. `VALIDATE_MODEL=google-vertex/claude-sonnet-5@default`). Each scenario runs in a fully isolated scratch project (XDG envs) via `opencode serve` + `opencode run --attach`, and writes evidence files (session output, plugin log, pgrep snapshots, job logs) plus `logs/validate/VALIDATION-REPORT.md`. S9 (compaction carry) is SKIP-with-reason in headless mode: no model in the local models.dev catalog carries `limits.context`, so core's auto-compaction never triggers.
 
 ## Non-goals (v1)
 

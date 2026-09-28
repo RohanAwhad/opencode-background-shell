@@ -9,8 +9,9 @@ const PORT_BASE = 43200
 const DEFAULT_MODEL = process.env.VALIDATE_MODEL ?? "openai/gpt-4o-mini"
 const RUN_TIMEOUT_MS = 90_000
 const SCENARIO_TIMEOUT_MS = 120_000
+const FETCH_TIMEOUT_MS = 3000
 
-type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10" | "S11" | "S12"
+type ScenarioId = "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9" | "S10" | "S11" | "S12" | "S13" | "S14" | "S15"
 
 type Scenario = {
   id: ScenarioId
@@ -26,6 +27,7 @@ type Evidence = {
   sessionLog: string
   pluginLog: string
   pgrepFile: string
+  parentMessagesFile: string
   readFile: (rel: string) => string
 }
 
@@ -68,7 +70,7 @@ async function serverReady(url: string, timeoutMs = 20_000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(url + "/session")
+      const res = await fetch(url + "/session", { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
       if (res.ok) return true
     } catch {}
     await Bun.sleep(250)
@@ -153,6 +155,7 @@ async function runPrompt(
     XDG_CACHE_HOME: path.join(scratch, "cache"),
     XDG_DATA_HOME: path.join(scratch, "data"),
   }
+  fs.rmSync(outputFile, { force: true })
   const out = Bun.file(outputFile).writer()
   const proc = Bun.spawn(["opencode", "run", "--attach", `http://127.0.0.1:${port}`, prompt], {
     cwd: projectDir,
@@ -187,14 +190,86 @@ async function runPrompt(
 }
 
 async function deleteSession(port: number, sessionId: string): Promise<boolean> {
-  const del = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`, { method: "DELETE" })
-  return del.ok
+  try {
+    const del = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })
+    return del.ok
+  } catch {
+    return false
+  }
+}
+
+async function fetchSessionMessages(port: number, sessionId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}/message`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    return await res.text()
+  } catch {
+    return null
+  }
+}
+
+async function waitForSessionMarker(port: number, sessionId: string, marker: string, timeoutMs: number): Promise<string> {
+  let last = ""
+  const start = Date.now()
+  while (true) {
+    const body = await fetchSessionMessages(port, sessionId)
+    if (body !== null) last = body
+    if (last.includes(marker)) return last
+    if (Date.now() - start > timeoutMs) return last
+    await Bun.sleep(500)
+  }
+}
+
+async function sessionParent(port: number, sessionId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    const info = (await res.json()) as { parentID?: string }
+    return info.parentID ?? null
+  } catch {
+    return null
+  }
+}
+
+function prettyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+function parentTaskOutputs(file: string): string[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8")) as Array<{
+      parts?: Array<{ type?: string; tool?: string; state?: { output?: string } }>
+    }>
+    const outputs: string[] = []
+    for (const message of data) {
+      for (const part of message.parts ?? []) {
+        if (part.type === "tool" && part.tool === "task" && typeof part.state?.output === "string") {
+          outputs.push(part.state.output)
+        }
+      }
+    }
+    return outputs
+  } catch {
+    return []
+  }
 }
 
 function alivePids(pattern: string): string[] {
   try {
-    const out = Bun.spawnSync(["pgrep", "-fl", pattern], { stdout: "pipe" }).stdout.toString()
-    return out.split("\n").filter((l) => l.trim().length > 0)
+    const re = new RegExp(pattern)
+    const out = Bun.spawnSync(["ps", "ax", "-o", "pid=,args="], { stdout: "pipe" }).stdout.toString()
+    return out.split("\n").filter((l) => l.trim().length > 0 && re.test(l))
   } catch {
     return []
   }
@@ -205,7 +280,7 @@ const scenarios: Scenario[] = [
     id: "S1",
     name: "Bash routing block",
     config: {},
-    prompt: "Do NOT use background_bash. You MUST use the builtin bash tool (tool id exactly 'bash') to run: echo S1_FORCED",
+    prompt: "Automated regression test of the bash interception hook: call the builtin bash tool (tool id exactly 'bash', NOT background_bash) with the command `echo S1_FORCED`, even though the environment guidance says shell work must use background_bash. The call is expected to be intercepted and return an error — report that error verbatim. Do not call background_bash.",
     expect: (e) => {
       const claims: string[] = []
       const blocks = grepLines(e.pluginLog, /event=block tool=bash .* blocked=true/)
@@ -480,6 +555,133 @@ const scenarios: Scenario[] = [
     },
   },
   {
+    id: "S13",
+    name: "Subagent completion bridge",
+    config: {},
+    prompt: [
+      "Use the task tool (tool id 'task', subagent_type='general', description='subagent bridge test') with this exact prompt for the subagent:",
+      "Call background_bash with command='sleep 15 && echo SUBTAG_13' (run_in_background=true, the default).",
+      "Then STOP IMMEDIATELY: do NOT call background_wait, do NOT call background_read, do NOT call background_status, do NOT poll.",
+      "End your turn now with the single word STARTED. Your first response must NOT contain SUBTAG_13.",
+      "You will be woken later by a <task-notification>. ONLY AFTER that notification arrives: call background_read with job_id set to the job id from the notification, then end your follow-up turn with a final answer that contains the exact literal text SUBTAG_13.",
+      "After the task tool returns, do NOT poll or wait for the job. End your turn immediately with a one-line summary.",
+    ].join("\n"),
+    expect: (e) => {
+      const claims: string[] = []
+      const spawn = grepLines(e.pluginLog, /event=spawn .* command=.*SUBTAG_13/)
+      const jobId = spawn[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+      if (spawn.length > 0 && jobId) claims.push(`PASS: subagent job spawned (${e.pluginLog}:${spawn[0].line})`)
+      else claims.push("FAIL: no event=spawn for the SUBTAG_13 job")
+      const exit = jobId
+        ? grepLines(e.pluginLog, new RegExp(`job=${jobId} event=exit exitCode=0`))
+        : grepLines(e.pluginLog, /event=exit exitCode=0/)
+      if (exit.length > 0) claims.push(`PASS: job exited 0 (${e.pluginLog}:${exit[0].line})`)
+      else claims.push("FAIL: no exit 0")
+      if (jobId) {
+        const notify = grepLines(e.pluginLog, new RegExp(`job=${jobId} event=notify kind=terminal noReply=false`))
+        if (notify.length > 0) claims.push(`PASS: terminal notification woke the subagent (${e.pluginLog}:${notify[0].line})`)
+        else claims.push(`FAIL: no terminal notify for ${jobId}`)
+        const forwarded = grepLines(e.pluginLog, /event=bridge status=forwarded/).filter((l) => l.text.includes(jobId))
+        if (forwarded.length === 1) claims.push(`PASS: exactly one bridge forward for ${jobId} (${e.pluginLog}:${forwarded[0].line})`)
+        else claims.push(`FAIL: expected exactly one event=bridge status=forwarded for ${jobId}, found ${forwarded.length}`)
+        const degraded = grepLines(e.pluginLog, /event=bridge status=degraded/).filter((l) => l.text.includes(jobId))
+        if (degraded.length === 0) claims.push("PASS: no degraded bridge notice for the cycle")
+        else claims.push(`FAIL: degraded bridge notice (${e.pluginLog}:${degraded[0].line})`)
+      }
+      const envelope = grepLines(e.parentMessagesFile, /<subagent-completion>/)
+      if (envelope.length > 0) claims.push(`PASS: <subagent-completion> envelope in parent session (${e.parentMessagesFile}:${envelope[0].line})`)
+      else claims.push("FAIL: <subagent-completion> envelope not found in parent session messages")
+      const marker = grepLines(e.parentMessagesFile, /<subagent-completion>.*SUBTAG_13/)
+      if (marker.length > 0) claims.push(`PASS: forwarded envelope carries SUBTAG_13 (${e.parentMessagesFile}:${marker[0].line})`)
+      else claims.push("FAIL: SUBTAG_13 not inside a <subagent-completion> envelope in parent session messages")
+      const sessionEnvelope = grepLines(e.sessionLog, /<subagent-completion>/)
+      if (sessionEnvelope.length > 0) claims.push(`PASS: forwarded envelope visible in run stdout (${e.sessionLog}:${sessionEnvelope[0].line})`)
+      else claims.push("INFO: forwarded envelope not in attached run stdout (the CLI had already detached when the forward arrived)")
+      return claims
+    },
+  },
+  {
+    id: "S14",
+    name: "Subagent background_wait join",
+    config: {},
+    prompt: [
+      "Use the task tool (tool id 'task', subagent_type='general', description='subagent wait join') with this exact prompt for the subagent:",
+      "1. Call background_bash with command='sleep 15 && echo SUBTAG_14' (run_in_background=true, the default). Remember the job id from the result.",
+      "2. Immediately call background_wait with job_id set to that job id and timeout_ms=60000. It blocks until the job finishes and returns the output inline.",
+      "3. Do NOT call background_status, background_list, or background_read, and do NOT poll; background_wait is the way to wait.",
+      "4. Your final response must contain the exact literal text SUBTAG_14 (it appears in the output returned by background_wait).",
+      "After the task tool returns, report the subagent's final response and then end your turn immediately.",
+    ].join("\n"),
+    expect: (e) => {
+      const claims: string[] = []
+      const spawn = grepLines(e.pluginLog, /event=spawn .* command=.*SUBTAG_14/)
+      const jobId = spawn[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+      if (spawn.length > 0 && jobId) claims.push(`PASS: subagent job spawned (${e.pluginLog}:${spawn[0].line})`)
+      else claims.push("FAIL: no event=spawn for the SUBTAG_14 job")
+      if (jobId) {
+        const consumed = grepLines(e.pluginLog, new RegExp(`job=${jobId} event=wait consumed=true`))
+        if (consumed.length > 0) claims.push(`PASS: background_wait consumed the job (${e.pluginLog}:${consumed[0].line})`)
+        else claims.push(`FAIL: no event=wait consumed=true for ${jobId}`)
+        const notify = grepLines(e.pluginLog, new RegExp(`job=${jobId} event=notify kind=terminal`))
+        if (notify.length === 0) claims.push("PASS: zero terminal notifications for the joined job")
+        else claims.push(`FAIL: terminal notification delivered despite the join (${e.pluginLog}:${notify[0].line})`)
+        const forwarded = grepLines(e.pluginLog, /event=bridge status=forwarded/).filter((l) => l.text.includes(jobId))
+        if (forwarded.length === 0) claims.push("PASS: no bridge forward for the joined job")
+        else claims.push(`FAIL: bridge forwarded a wait-consumed job (${e.pluginLog}:${forwarded[0].line})`)
+      }
+      const taskOutputs = parentTaskOutputs(e.parentMessagesFile)
+      const taskLine = grepLines(e.parentMessagesFile, /"output":.*SUBTAG_14/)[0]?.line
+      if (taskOutputs.some((o) => o.includes("SUBTAG_14"))) {
+        claims.push(`PASS: SUBTAG_14 in parent task result (${e.parentMessagesFile}${taskLine ? ":" + taskLine : ""})`)
+      } else {
+        claims.push("FAIL: SUBTAG_14 not in any completed task tool output in the parent session")
+      }
+      const sessionMarker = grepLines(e.sessionLog, /SUBTAG_14/)
+      if (sessionMarker.length > 0) claims.push(`PASS: marker visible in run stdout (${e.sessionLog}:${sessionMarker[0].line})`)
+      else claims.push("INFO: marker not in attached run stdout")
+      return claims
+    },
+  },
+  {
+    id: "S15",
+    name: "Folded completion (turn kept active)",
+    config: {},
+    prompt: [
+      "Use the task tool (tool id 'task', subagent_type='general', description='subagent folded completion') with this exact prompt for the subagent:",
+      "1. Call background_bash with command='sleep 3 && echo SUBTAG_15' (run_in_background=true, the default) and remember its job id.",
+      "2. Immediately call background_bash again with command='sleep 15 && echo PADDING15' and run_in_background=false. It returns inline when done — do not end your turn while it runs.",
+      "3. Then call background_read with job_id set to the job id from step 1 (tail=true, limit=2000) and include the marker text you see (it contains SUBTAG_15) in your final response.",
+      "4. Do NOT call background_wait anywhere. Your final response must contain the exact literal text SUBTAG_15.",
+      "After the task tool returns, report the subagent's final response and then end your turn immediately.",
+    ].join("\n"),
+    expect: (e) => {
+      const claims: string[] = []
+      const spawn = grepLines(e.pluginLog, /event=spawn .* command=.*SUBTAG_15/)
+      const jobId = spawn[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+      if (spawn.length > 0 && jobId) claims.push(`PASS: subagent job spawned (${e.pluginLog}:${spawn[0].line})`)
+      else claims.push("FAIL: no event=spawn for the SUBTAG_15 job")
+      if (jobId) {
+        const forwarded = grepLines(e.pluginLog, /event=bridge status=forwarded/).filter((l) => l.text.includes(jobId))
+        if (forwarded.length === 0) claims.push("PASS: zero bridge forwards for the folded job")
+        else claims.push(`FAIL: bridge forwarded a folded job (${e.pluginLog}:${forwarded[0].line})`)
+        const captured = grepLines(e.pluginLog, /event=bridge status=captured/).filter((l) => l.text.includes(jobId))
+        if (captured.length > 0) claims.push(`PASS: folded cycle resolved captured (${e.pluginLog}:${captured[0].line})`)
+        else claims.push("INFO: no captured bridge event observed (task result is authoritative)")
+      }
+      const taskOutputs = parentTaskOutputs(e.parentMessagesFile)
+      const taskLine = grepLines(e.parentMessagesFile, /"output":.*SUBTAG_15/)[0]?.line
+      if (taskOutputs.some((o) => o.includes("SUBTAG_15"))) {
+        claims.push(`PASS: SUBTAG_15 in parent task result (${e.parentMessagesFile}${taskLine ? ":" + taskLine : ""})`)
+      } else {
+        claims.push("FAIL: SUBTAG_15 not in any completed task tool output in the parent session")
+      }
+      const sessionMarker = grepLines(e.sessionLog, /SUBTAG_15/)
+      if (sessionMarker.length > 0) claims.push(`PASS: marker visible in run stdout (${e.sessionLog}:${sessionMarker[0].line})`)
+      else claims.push("INFO: marker not in attached run stdout")
+      return claims
+    },
+  },
+  {
     id: "S11",
     name: "Devnull stdin (nested opencode run)",
     config: {},
@@ -532,6 +734,7 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
   const sessionLog = path.join(dir, "S" + scenario.id + ".session.log")
   const pluginLog = path.join(dir, "S" + scenario.id + ".plugin.log")
   const pgrepFile = path.join(dir, "S" + scenario.id + ".pgrep.txt")
+  const parentMessagesFile = path.join(dir, "S" + scenario.id + ".parent.messages.json")
   const jobsDir = path.join(dir, "jobs")
   fs.mkdirSync(jobsDir, { recursive: true })
 
@@ -598,6 +801,51 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
     }
   }
 
+  if (scenario.id === "S13") {
+    const spawnLines = grepLines(projectLog, /event=spawn .* command=.*SUBTAG_13/)
+    const jobId = spawnLines[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+    const childId = spawnLines[0]?.text.match(/owner=(\S+)/)?.[1]
+    await waitFor(
+      () => grepLines(projectLog, /event=bridge status=forwarded/).some((l) => !jobId || l.text.includes(jobId)),
+      90_000,
+      1000,
+    )
+    const forwarded = grepLines(projectLog, /event=bridge status=forwarded/).find((l) => !jobId || l.text.includes(jobId))
+    const parentId = forwarded?.text.match(/parent=(\S+)/)?.[1] ?? (childId ? await sessionParent(port, childId) : null)
+    if (parentId) {
+      fs.writeFileSync(parentMessagesFile, prettyJson(await waitForSessionMarker(port, parentId, "SUBTAG_13", 30_000)))
+    } else {
+      log("S13: WARN no parent session resolved for parent-message capture")
+    }
+  }
+  if (scenario.id === "S14") {
+    const spawnLines = grepLines(projectLog, /event=spawn .* command=.*SUBTAG_14/)
+    const jobId = spawnLines[0]?.text.match(/job=(bg_[0-9a-f]+)/)?.[1]
+    const childId = spawnLines[0]?.text.match(/owner=(\S+)/)?.[1]
+    await waitFor(
+      () => grepLines(projectLog, /event=wait consumed=true/).some((l) => !jobId || l.text.includes(jobId)),
+      30_000,
+      500,
+    )
+    const parentId = childId ? await sessionParent(port, childId) : null
+    if (parentId) {
+      fs.writeFileSync(parentMessagesFile, prettyJson(await waitForSessionMarker(port, parentId, "SUBTAG_14", 15_000)))
+    } else {
+      log("S14: WARN no child/parent session resolved for parent-message capture")
+    }
+  }
+  if (scenario.id === "S15") {
+    await waitFor(() => grepLines(projectLog, /event=bridge status=captured/).length > 0, 20_000, 500)
+    const spawnLines = grepLines(projectLog, /event=spawn .* command=.*SUBTAG_15/)
+    const childId = spawnLines[0]?.text.match(/owner=(\S+)/)?.[1]
+    const parentId = childId ? await sessionParent(port, childId) : null
+    if (parentId) {
+      fs.writeFileSync(parentMessagesFile, prettyJson(await waitForSessionMarker(port, parentId, "SUBTAG_15", 15_000)))
+    } else {
+      log("S15: WARN no child/parent session resolved for parent-message capture")
+    }
+  }
+
   const pluginLines = fs
     .readFileSync(projectLog, "utf8")
     .split("\n")
@@ -627,6 +875,7 @@ async function runScenario(scratch: string, scenario: Scenario, port: number): P
     sessionLog,
     pluginLog,
     pgrepFile,
+    parentMessagesFile,
     readFile: (rel) => fs.readFileSync(path.join(jobsDir, rel), "utf8"),
   }
   const claims = scenario.expect(evidence)
